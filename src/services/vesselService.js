@@ -85,7 +85,7 @@ class VesselService {
 
         console.log('Starting HTTP polling fallback...')
         this.poll()
-        this.pollingInterval = setInterval(() => this.poll(), 5000)
+        this.pollingInterval = setInterval(() => this.poll(), 30000) // 30s to match Render idle behavior
     }
 
     async poll() {
