@@ -468,33 +468,67 @@ async function searchVesselByName(vesselName) {
         }
     }
 
-    // Try exact name first, then first word only
-    const searchVariants = [cleanName, cleanName.split(/\s+/)[0]]
+    // Generate name variations: with spaces, without spaces, first word, hyphenated
+    function generateNameVariants(name) {
+        const variants = new Set()
+        const upper = name.toUpperCase().trim()
+
+        // Original with spaces
+        variants.add(upper)
+
+        // Without any spaces (SOLUNITY)
+        variants.add(upper.replace(/\s+/g, ''))
+
+        // With single space between words
+        variants.add(upper.replace(/\s+/g, ' '))
+
+        // First word only (SOL)
+        const firstWord = upper.split(/\s+/)[0]
+        if (firstWord.length >= 3) variants.add(firstWord)
+
+        // With hyphens instead of spaces (SOL-UNITY)
+        variants.add(upper.replace(/\s+/g, '-'))
+
+        // Try adding space after common prefixes if name has no spaces
+        if (!upper.includes(' ') && upper.length > 4) {
+            // Try splitting at common word boundaries
+            for (let i = 3; i < Math.min(upper.length - 2, 8); i++) {
+                variants.add(upper.slice(0, i) + ' ' + upper.slice(i))
+            }
+        }
+
+        return Array.from(variants)
+    }
+
+    const searchVariants = generateNameVariants(cleanName)
+    console.log('Trying name variants:', searchVariants.slice(0, 5).join(', '))
 
     for (const term of searchVariants) {
         const result = await vesselFinderScrape(term)
         if (result) return result
     }
 
-    // Fallback: Try MyShipTracking autocomplete (fast, returns MMSI in response)
-    try {
-        const url = `https://www.myshiptracking.com/requests/autocomplete-ede42.php?term=${encodeURIComponent(cleanName)}`
-        const res = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.myshiptracking.com/' }
-        })
-        if (res.ok) {
-            const data = await res.json()
-            if (Array.isArray(data) && data.length > 0) {
-                const match = data[0]
-                const mmsiMatch = (match.value || match.label || '').match(/\b(\d{9})\b/)
-                if (mmsiMatch) {
-                    console.log('Found vessel via MyShipTracking:', match.label, mmsiMatch[1])
-                    return { mmsi: mmsiMatch[1], name: (match.label || '').split(' - ')[0].trim(), source: 'myshiptracking' }
+    // Fallback: Try MyShipTracking autocomplete with variations (fast, returns MMSI in response)
+    for (const term of searchVariants.slice(0, 3)) {
+        try {
+            const url = `https://www.myshiptracking.com/requests/autocomplete-ede42.php?term=${encodeURIComponent(term)}`
+            const res = await fetch(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.myshiptracking.com/' }
+            })
+            if (res.ok) {
+                const data = await res.json()
+                if (Array.isArray(data) && data.length > 0) {
+                    const match = data[0]
+                    const mmsiMatch = (match.value || match.label || '').match(/\b(\d{9})\b/)
+                    if (mmsiMatch) {
+                        console.log('Found vessel via MyShipTracking:', match.label, mmsiMatch[1])
+                        return { mmsi: mmsiMatch[1], name: (match.label || '').split(' - ')[0].trim(), source: 'myshiptracking' }
+                    }
                 }
             }
+        } catch (err) {
+            console.log('MyShipTracking failed:', err.message)
         }
-    } catch (err) {
-        console.log('MyShipTracking failed:', err.message)
     }
 
     console.log('Could not find MMSI for vessel:', cleanName)
