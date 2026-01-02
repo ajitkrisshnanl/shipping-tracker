@@ -605,6 +605,7 @@ async function createVesselFromImport(details, rawText = '') {
     // Get coordinates for origin and destination ports
     const originCoords = await geocodePort(details.origin)
     const destCoords = await geocodePort(details.destination)
+    console.log('Geocode results:', { origin: details.origin, originCoords, destination: details.destination, destCoords })
 
     const vessel = {
         mmsi: mmsi.toString(),
@@ -644,6 +645,9 @@ async function createVesselFromImport(details, rawText = '') {
         vessel.route = route
         vessel.eta = details.eta || null
         vessel.nextWaypoint = route[1] || null
+        console.log('Route calculated:', route.length, 'waypoints')
+    } else {
+        console.log('Route NOT calculated - missing coords:', { originLat: vessel.originLat, originLng: vessel.originLng, destLat: vessel.destLat, destLng: vessel.destLng })
     }
 
     trackedVessels.set(vessel.mmsi, vessel)
