@@ -1,0 +1,31 @@
+{
+  "name": "shipping_tracker",
+  "version": "1.0.0",
+  "description": "Live shipping vessel tracker with PDF Bill of Lading import",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "node server.js",
+    "start": "NODE_ENV=production node server.js"
+  },
+  "keywords": ["shipping", "vessel", "tracker", "ais"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@vitejs/plugin-react": "^5.1.2",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "leaflet": "^1.9.4",
+    "multer": "^2.0.2",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-leaflet": "^5.0.0",
+    "vite": "^7.3.0",
+    "ws": "^8.18.3"
+  }
+}
