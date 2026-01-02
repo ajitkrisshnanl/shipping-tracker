@@ -2,7 +2,7 @@
   "name": "shipping_tracker",
   "version": "1.0.0",
   "description": "Live shipping vessel tracker with PDF Bill of Lading import",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
