@@ -12,5 +12,5 @@ services:
         sync: false
       - key: MARINESIA_API_KEY
         sync: false
-      - key: AIS_API_KEY
+      - key: AIRSTREAM_API
         sync: false

@@ -43,8 +43,8 @@ const PORT_COORDINATES = {}
 // Tracked vessels from AIS Stream
 const trackedVessels = new Map()
 
-// AIS Stream API Key (websocket). Optional; disabled by default to keep everything on HTTP polling.
-const AIS_API_KEY = process.env.AIS_API_KEY || null
+// AIS Stream API Key (websocket) - supports both naming conventions
+const AIS_API_KEY = process.env.AIS_API_KEY || process.env.AIRSTREAM_API || null
 const DISABLE_AIS_STREAM = process.env.DISABLE_AIS_STREAM === 'true' || process.env.NO_AIS_STREAM === 'true'
 
 // Marinesia API key (HTTP polling)
