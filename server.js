@@ -64,10 +64,16 @@ function ensureAISConnection() {
 
     aisSocket.on('message', (event) => {
         try {
-            const message = JSON.parse(event.data)
+            // Handle both string and Buffer data
+            const data = typeof event === 'string' ? event : event.toString()
+            if (!data || data === 'undefined') return
+            const message = JSON.parse(data)
             handleAisMessage(message)
         } catch (err) {
-            console.error('AIS message parse error', err.message)
+            // Only log if it's an actual parse error, not empty messages
+            if (err.message !== "Unexpected token 'u', \"undefined\" is not valid JSON") {
+                console.error('AIS message parse error:', err.message)
+            }
         }
     })
 
@@ -342,92 +348,136 @@ function extractMmsiFromText(text) {
     return match ? match[1] : null
 }
 
-// Search for vessel MMSI by name using free vessel databases
+// Search for vessel MMSI by name using multiple free vessel databases
 async function searchVesselByName(vesselName) {
     if (!vesselName) return null
 
     const cleanName = vesselName.trim().toUpperCase()
     console.log('Searching for vessel MMSI:', cleanName)
 
-    // Try VesselFinder public search
-    try {
-        const searchUrl = `https://www.vesselfinder.com/api/pub/search/v1?s=${encodeURIComponent(cleanName)}`
-        const res = await fetch(searchUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json'
-            }
-        })
-        if (res.ok) {
-            const data = await res.json()
-            if (data && Array.isArray(data) && data.length > 0) {
-                // Find best match
-                const match = data.find(v =>
-                    (v.name || '').toUpperCase().includes(cleanName) ||
-                    cleanName.includes((v.name || '').toUpperCase())
-                ) || data[0]
-                if (match && match.mmsi) {
-                    console.log('Found vessel via VesselFinder:', match.name, match.mmsi)
-                    return {
-                        mmsi: match.mmsi.toString(),
-                        name: match.name,
-                        imo: match.imo,
-                        type: match.type,
-                        flag: match.flag
-                    }
-                }
-            }
-        }
-    } catch (err) {
-        console.log('VesselFinder search failed:', err.message)
-    }
+    // Try multiple search variations
+    const searchVariants = [
+        cleanName,
+        cleanName.replace(/\s+/g, ''),  // No spaces
+        cleanName.split(/\s+/)[0],       // First word only
+    ]
 
-    // Try Datalastic free API
-    try {
-        const url = `https://api.datalastic.com/api/v0/vessel?api-key=demo&name=${encodeURIComponent(cleanName)}`
-        const res = await fetch(url)
-        if (res.ok) {
-            const data = await res.json()
-            if (data && data.data && data.data.length > 0) {
-                const match = data.data[0]
-                if (match.mmsi) {
-                    console.log('Found vessel via Datalastic:', match.name, match.mmsi)
-                    return {
-                        mmsi: match.mmsi.toString(),
-                        name: match.name,
-                        imo: match.imo,
-                        type: match.vessel_type,
-                        flag: match.flag
-                    }
+    for (const searchTerm of searchVariants) {
+        // 1. Try MyShipTracking public search (scrape-friendly)
+        try {
+            const url = `https://www.myshiptracking.com/requests/autocomplete-ede42.php?term=${encodeURIComponent(searchTerm)}`
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; ShippingTracker/1.0)',
+                    'Accept': 'application/json',
+                    'Referer': 'https://www.myshiptracking.com/'
                 }
-            }
-        }
-    } catch (err) {
-        console.log('Datalastic search failed:', err.message)
-    }
+            })
+            if (res.ok) {
+                const data = await res.json()
+                if (data && Array.isArray(data) && data.length > 0) {
+                    const match = data.find(v => {
+                        const name = (v.label || v.value || '').toUpperCase()
+                        return name.includes(cleanName) || cleanName.includes(name.split(' ')[0])
+                    }) || data[0]
 
-    // Try Searoutes vessel lookup
-    try {
-        const url = `https://api.searoutes.com/vessel/v2/search?name=${encodeURIComponent(cleanName)}`
-        const res = await fetch(url, {
-            headers: { 'Accept': 'application/json' }
-        })
-        if (res.ok) {
-            const data = await res.json()
-            if (data && Array.isArray(data) && data.length > 0) {
-                const match = data[0]
-                if (match.mmsi) {
-                    console.log('Found vessel via Searoutes:', match.name, match.mmsi)
-                    return {
-                        mmsi: match.mmsi.toString(),
-                        name: match.name,
-                        imo: match.imo
+                    // Extract MMSI from the result (format varies)
+                    const mmsiMatch = (match.value || match.label || '').match(/\b(\d{9})\b/)
+                    if (mmsiMatch) {
+                        console.log('Found vessel via MyShipTracking:', match.label, mmsiMatch[1])
+                        return {
+                            mmsi: mmsiMatch[1],
+                            name: (match.label || '').split(' - ')[0].trim(),
+                            source: 'myshiptracking'
+                        }
                     }
                 }
             }
+        } catch (err) {
+            console.log('MyShipTracking search failed:', err.message)
         }
-    } catch (err) {
-        console.log('Searoutes search failed:', err.message)
+
+        // 2. Try MarineTraffic public search
+        try {
+            const url = `https://www.marinetraffic.com/en/ais/index/search/all/keyword:${encodeURIComponent(searchTerm)}`
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; ShippingTracker/1.0)',
+                    'Accept': 'text/html'
+                }
+            })
+            if (res.ok) {
+                const html = await res.text()
+                // Look for MMSI in the search results page
+                const mmsiMatch = html.match(/mmsi["\s:=]+(\d{9})/i)
+                const nameMatch = html.match(/ship_name["\s:=]+["']?([^"'<>]+)/i)
+                if (mmsiMatch) {
+                    console.log('Found vessel via MarineTraffic:', nameMatch?.[1] || searchTerm, mmsiMatch[1])
+                    return {
+                        mmsi: mmsiMatch[1],
+                        name: nameMatch?.[1] || searchTerm,
+                        source: 'marinetraffic'
+                    }
+                }
+            }
+        } catch (err) {
+            console.log('MarineTraffic search failed:', err.message)
+        }
+
+        // 3. Try Datalastic demo API
+        try {
+            const url = `https://api.datalastic.com/api/v0/vessel?api-key=demo&name=${encodeURIComponent(searchTerm)}`
+            const res = await fetch(url)
+            if (res.ok) {
+                const data = await res.json()
+                if (data && data.data && data.data.length > 0) {
+                    const match = data.data[0]
+                    if (match.mmsi) {
+                        console.log('Found vessel via Datalastic:', match.name, match.mmsi)
+                        return {
+                            mmsi: match.mmsi.toString(),
+                            name: match.name,
+                            imo: match.imo,
+                            type: match.vessel_type,
+                            flag: match.flag,
+                            source: 'datalastic'
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            console.log('Datalastic search failed:', err.message)
+        }
+
+        // 4. Try VesselFinder public API
+        try {
+            const searchUrl = `https://www.vesselfinder.com/api/pub/search/v1?s=${encodeURIComponent(searchTerm)}`
+            const res = await fetch(searchUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json'
+                }
+            })
+            if (res.ok) {
+                const data = await res.json()
+                if (data && Array.isArray(data) && data.length > 0) {
+                    const match = data[0]
+                    if (match.mmsi) {
+                        console.log('Found vessel via VesselFinder:', match.name, match.mmsi)
+                        return {
+                            mmsi: match.mmsi.toString(),
+                            name: match.name,
+                            imo: match.imo,
+                            type: match.type,
+                            flag: match.flag,
+                            source: 'vesselfinder'
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            console.log('VesselFinder search failed:', err.message)
+        }
     }
 
     console.log('Could not find MMSI for vessel:', cleanName)
