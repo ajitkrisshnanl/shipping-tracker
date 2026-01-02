@@ -788,21 +788,26 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
         enriched.weather = await getMarineConditions(enriched.latitude, enriched.longitude)
     }
 
-    if (enriched.origin && enriched.destination && enriched.latitude && enriched.longitude) {
+    // Calculate route if we have origin/dest coordinates (even without live position)
+    if (enriched.origin && enriched.destination && enriched.originLat && enriched.destLat) {
         const route = calculateRoute(
-            enriched.originLat || enriched.latitude,
-            enriched.originLng || enriched.longitude,
-            enriched.destLat || enriched.latitude,
-            enriched.destLng || enriched.longitude,
+            enriched.originLat,
+            enriched.originLng,
+            enriched.destLat,
+            enriched.destLng,
             enriched.origin,
             enriched.destination
         )
-        const etaCalc = estimateArrival(route, enriched.latitude, enriched.longitude, enriched.speed || 12)
         enriched.route = route
-        enriched.eta = enriched.eta || etaCalc?.eta
-        enriched.distanceRemainingNm = etaCalc?.distanceRemaining || null
-        enriched.hoursRemaining = etaCalc?.hoursRemaining || null
         enriched.nextWaypoint = route[1] || null
+
+        // Calculate ETA only if we have current position
+        if (enriched.latitude && enriched.longitude) {
+            const etaCalc = estimateArrival(route, enriched.latitude, enriched.longitude, enriched.speed || 12)
+            enriched.eta = enriched.eta || etaCalc?.eta
+            enriched.distanceRemainingNm = etaCalc?.distanceRemaining || null
+            enriched.hoursRemaining = etaCalc?.hoursRemaining || null
+        }
     }
 
     res.json({ vessel: enriched })
