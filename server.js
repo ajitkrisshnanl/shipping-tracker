@@ -342,6 +342,98 @@ function extractMmsiFromText(text) {
     return match ? match[1] : null
 }
 
+// Search for vessel MMSI by name using free vessel databases
+async function searchVesselByName(vesselName) {
+    if (!vesselName) return null
+
+    const cleanName = vesselName.trim().toUpperCase()
+    console.log('Searching for vessel MMSI:', cleanName)
+
+    // Try VesselFinder public search
+    try {
+        const searchUrl = `https://www.vesselfinder.com/api/pub/search/v1?s=${encodeURIComponent(cleanName)}`
+        const res = await fetch(searchUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json'
+            }
+        })
+        if (res.ok) {
+            const data = await res.json()
+            if (data && Array.isArray(data) && data.length > 0) {
+                // Find best match
+                const match = data.find(v =>
+                    (v.name || '').toUpperCase().includes(cleanName) ||
+                    cleanName.includes((v.name || '').toUpperCase())
+                ) || data[0]
+                if (match && match.mmsi) {
+                    console.log('Found vessel via VesselFinder:', match.name, match.mmsi)
+                    return {
+                        mmsi: match.mmsi.toString(),
+                        name: match.name,
+                        imo: match.imo,
+                        type: match.type,
+                        flag: match.flag
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.log('VesselFinder search failed:', err.message)
+    }
+
+    // Try Datalastic free API
+    try {
+        const url = `https://api.datalastic.com/api/v0/vessel?api-key=demo&name=${encodeURIComponent(cleanName)}`
+        const res = await fetch(url)
+        if (res.ok) {
+            const data = await res.json()
+            if (data && data.data && data.data.length > 0) {
+                const match = data.data[0]
+                if (match.mmsi) {
+                    console.log('Found vessel via Datalastic:', match.name, match.mmsi)
+                    return {
+                        mmsi: match.mmsi.toString(),
+                        name: match.name,
+                        imo: match.imo,
+                        type: match.vessel_type,
+                        flag: match.flag
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.log('Datalastic search failed:', err.message)
+    }
+
+    // Try Searoutes vessel lookup
+    try {
+        const url = `https://api.searoutes.com/vessel/v2/search?name=${encodeURIComponent(cleanName)}`
+        const res = await fetch(url, {
+            headers: { 'Accept': 'application/json' }
+        })
+        if (res.ok) {
+            const data = await res.json()
+            if (data && Array.isArray(data) && data.length > 0) {
+                const match = data[0]
+                if (match.mmsi) {
+                    console.log('Found vessel via Searoutes:', match.name, match.mmsi)
+                    return {
+                        mmsi: match.mmsi.toString(),
+                        name: match.name,
+                        imo: match.imo
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.log('Searoutes search failed:', err.message)
+    }
+
+    console.log('Could not find MMSI for vessel:', cleanName)
+    return null
+}
+
 async function createVesselFromImport(details, rawText = '') {
     if (!details.vessel) return null
 
@@ -349,11 +441,23 @@ async function createVesselFromImport(details, rawText = '') {
 
     // Try to extract MMSI from document or AI extraction
     let mmsi = details.mmsi || extractMmsiFromText(rawText)
+    let vesselInfo = null
 
-    // If no MMSI found, create a simulated vessel ID
+    // If no MMSI found, search vessel databases
     if (!mmsi) {
-        console.log('No MMSI found, creating simulated vessel:', vesselName)
-        mmsi = 'SIM' + Date.now().toString().slice(-9)
+        console.log('No MMSI in document, searching vessel databases...')
+        vesselInfo = await searchVesselByName(vesselName)
+        if (vesselInfo && vesselInfo.mmsi) {
+            mmsi = vesselInfo.mmsi
+            console.log('Found MMSI from database:', mmsi)
+        }
+    }
+
+    // If still no MMSI, we cannot track this vessel with real AIS data
+    if (!mmsi) {
+        console.error('ERROR: Could not find MMSI for vessel:', vesselName)
+        console.error('Please provide the MMSI number in the Bill of Lading or manually')
+        return null
     }
 
     // Get coordinates for origin and destination ports
@@ -362,7 +466,10 @@ async function createVesselFromImport(details, rawText = '') {
 
     const vessel = {
         mmsi: mmsi.toString(),
-        name: vesselName,
+        name: vesselInfo?.name || vesselName,
+        imo: vesselInfo?.imo || null,
+        flag: vesselInfo?.flag || null,
+        shipType: vesselInfo?.type || null,
         destination: details.destination || null,
         origin: details.origin || null,
         voyage: details.voyage || null,
@@ -374,15 +481,14 @@ async function createVesselFromImport(details, rawText = '') {
         originLng: originCoords?.lon ?? null,
         destLat: destCoords?.lat ?? null,
         destLng: destCoords?.lon ?? null,
-        // For simulated vessels, place them at origin
-        latitude: originCoords?.lat ?? null,
-        longitude: originCoords?.lon ?? null,
-        speed: 12, // Default speed for route estimation
-        isSimulated: mmsi.toString().startsWith('SIM'),
+        // Position will be updated by Airstream
+        latitude: null,
+        longitude: null,
+        speed: null,
         importedAt: new Date().toISOString()
     }
 
-    // Compute route + ETA
+    // Compute route (ETA will be calculated once we get live position from Airstream)
     if (vessel.origin && vessel.destination && vessel.originLat && vessel.destLat) {
         const route = calculateRoute(
             vessel.originLat,
@@ -392,24 +498,16 @@ async function createVesselFromImport(details, rawText = '') {
             vessel.origin,
             vessel.destination
         )
-        const etaCalc = estimateArrival(route, vessel.latitude || vessel.originLat, vessel.longitude || vessel.originLng, vessel.speed)
         vessel.route = route
-        vessel.eta = details.eta || etaCalc?.eta
-        vessel.distanceRemainingNm = etaCalc?.distanceRemaining || null
-        vessel.hoursRemaining = etaCalc?.hoursRemaining || null
+        vessel.eta = details.eta || null
         vessel.nextWaypoint = route[1] || null
-    }
-
-    if (vessel.latitude && vessel.longitude) {
-        vessel.bottleneckWarning = checkBottleneckProximity(vessel.latitude, vessel.longitude)
     }
 
     trackedVessels.set(vessel.mmsi, vessel)
 
-    // Subscribe to AIS updates if we have a real MMSI
-    if (!vessel.isSimulated) {
-        subscribeToMMSI(vessel.mmsi)
-    }
+    // Subscribe to Airstream for live AIS updates
+    subscribeToMMSI(vessel.mmsi)
+    console.log('Subscribed to Airstream for vessel:', vessel.name, vessel.mmsi)
 
     return vessel
 }
@@ -473,17 +571,25 @@ app.post('/api/import/bl', upload.single('file'), async (req, res) => {
             } else {
                 vesselDatabase.push(vessel)
             }
-            console.log('Vessel imported:', vessel.name, vessel.mmsi, vessel.isSimulated ? '(simulated)' : '(live AIS)')
+            console.log('Vessel imported:', vessel.name, vessel.mmsi)
         }
 
-        res.json({
+        const response = {
             success: !!vessel,
             vessel,
             extractedDetails: details,
             extractionMethod,
-            textLength: text.length,
-            isSimulated: vessel?.isSimulated || false
-        })
+            textLength: text.length
+        }
+
+        // Add error message if vessel couldn't be created
+        if (!vessel && details.vessel) {
+            response.error = `Could not find MMSI for vessel "${details.vessel}". The vessel may not be in global AIS databases. Try adding the 9-digit MMSI number to the Bill of Lading.`
+        } else if (!vessel) {
+            response.error = 'Could not extract vessel information from the PDF.'
+        }
+
+        res.json(response)
     } catch (error) {
         console.error('Import error:', error)
         res.status(500).json({ error: error.message })
