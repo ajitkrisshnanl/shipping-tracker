@@ -47,9 +47,28 @@ const subscribedMmsi = new Set()
 let subscriptionDebounce = null
 let reconnectTimer = null
 
+// Dynamic bounding boxes for AIS subscriptions (start with global; add smaller boxes when hunting by name)
+const dynamicBoundingBoxes = new Set([JSON.stringify([[-90, -180], [90, 180]])])
+
+// Pending vessel name hunts (when MMSI is unknown). Keyed by normalized name.
+const pendingNameLookups = new Map()
+
+function addBoundingBox(box) {
+    if (!Array.isArray(box) || box.length !== 2) return
+    const key = JSON.stringify(box)
+    if (!dynamicBoundingBoxes.has(key)) {
+        dynamicBoundingBoxes.add(key)
+        queueSubscriptionUpdate()
+    }
+}
+
+function getBoundingBoxesForSubscription() {
+    const boxes = Array.from(dynamicBoundingBoxes).map((b) => JSON.parse(b))
+    return boxes.length ? boxes : [[[-90, -180], [90, 180]]]
+}
 function ensureAISConnection() {
-    if (!AIS_API_KEY) {
-        console.log('No AIS_API_KEY/AIRSTREAM_API configured')
+    if (!AIS_API_KEY || DISABLE_AIS_STREAM) {
+        if (!AIS_API_KEY) console.log('No AIS_API_KEY/AIRSTREAM_API configured')
         return
     }
     if (aisSocket && (aisSocket.readyState === WebSocket.OPEN || aisSocket.readyState === WebSocket.CONNECTING)) return
@@ -91,18 +110,15 @@ function ensureAISConnection() {
 
 function sendAisSubscription() {
     if (!aisSocket || aisSocket.readyState !== WebSocket.OPEN) return
-    if (subscribedMmsi.size === 0) {
-        // Subscribe to global bounding box if no specific MMSIs
-        console.log('Subscribing to global AIS feed...')
-    }
+    const boxes = getBoundingBoxesForSubscription()
     const payload = {
         APIKey: AIS_API_KEY,
-        BoundingBoxes: [[[-90, -180], [90, 180]]],
+        BoundingBoxes: boxes,
         FiltersShipMMSI: subscribedMmsi.size > 0 ? Array.from(subscribedMmsi).slice(0, 50) : undefined,
         FilterMessageTypes: ["PositionReport", "ShipStaticData", "ExtendedClassBPositionReport", "StandardClassBPositionReport", "StaticDataReport"]
     }
     aisSocket.send(JSON.stringify(payload))
-    console.log('AIS subscription sent for', subscribedMmsi.size, 'vessels')
+    console.log('AIS subscription sent for', subscribedMmsi.size, 'vessels', 'boxes:', boxes.length)
 }
 
 function queueSubscriptionUpdate() {
@@ -111,7 +127,7 @@ function queueSubscriptionUpdate() {
 }
 
 function subscribeToMMSI(mmsi) {
-    if (!mmsi || mmsi.toString().startsWith('SIM')) return // Don't subscribe simulated vessels
+    if (!mmsi || mmsi.toString().startsWith('SIM') || mmsi.toString().startsWith('PENDING')) return // Don't subscribe simulated/pending vessels
     subscribedMmsi.add(mmsi.toString())
     ensureAISConnection()
     queueSubscriptionUpdate()
@@ -182,6 +198,37 @@ async function handleAisMessage(message) {
         updated.hoursRemaining = etaCalc?.hoursRemaining || null
     }
 
+    // If this matches a pending name hunt, bind the MMSI and upgrade the record
+    const normName = normalizeName(vesselName || '')
+    if (normName && pendingNameLookups.has(normName)) {
+        const pending = pendingNameLookups.get(normName)
+        pendingNameLookups.delete(normName)
+
+        const seeded = pending.seed || {}
+        // Remove pending placeholder
+        if (pending.pendingId) {
+            trackedVessels.delete(pending.pendingId)
+            const idx = vesselDatabase.findIndex(v => v.mmsi === pending.pendingId)
+            if (idx >= 0) vesselDatabase.splice(idx, 1)
+        }
+
+        updated.origin = updated.origin || seeded.origin
+        updated.destination = updated.destination || seeded.destination
+        updated.originLat = updated.originLat || seeded.originLat
+        updated.originLng = updated.originLng || seeded.originLng
+        updated.destLat = updated.destLat || seeded.destLat
+        updated.destLng = updated.destLng || seeded.destLng
+        updated.route = updated.route || seeded.route
+        updated.eta = updated.eta || seeded.eta
+        updated.searching = false
+        updated.searchSource = 'aisstream-name-hunt'
+        updated.updatedAt = new Date().toISOString()
+
+        subscribeToMMSI(mmsi)
+        console.log('Bound pending vessel to MMSI via AIS name match:', vesselName, mmsi)
+    }
+
+    updated.updatedAt = new Date().toISOString()
     trackedVessels.set(mmsi, updated)
 
     // Also update vesselDatabase if this vessel was imported
@@ -348,136 +395,106 @@ function extractMmsiFromText(text) {
     return match ? match[1] : null
 }
 
-// Search for vessel MMSI by name using multiple free vessel databases
+function normalizeName(name) {
+    return (name || '').toString().toUpperCase().replace(/[^A-Z0-9]/g, '')
+}
+
+function buildBoundingBox(lat, lon, km = 250) {
+    if (!lat || !lon) return null
+    const d = km / 111 // approx degrees per km
+    return [
+        [lat + d, lon - d],
+        [lat - d, lon + d]
+    ]
+}
+
+function startNameHunt(targetName, boundingBoxes, seed) {
+    const norm = normalizeName(targetName)
+    if (!norm) return
+    pendingNameLookups.set(norm, {
+        pendingId: seed?.mmsi,
+        targetName: targetName,
+        seed,
+        boxes: boundingBoxes
+    })
+    ;(boundingBoxes || []).forEach(addBoundingBox)
+    queueSubscriptionUpdate()
+}
+
+// Search for vessel MMSI by name - efficient scraping only (no API keys needed)
 async function searchVesselByName(vesselName) {
     if (!vesselName) return null
 
     const cleanName = vesselName.trim().toUpperCase()
     console.log('Searching for vessel MMSI:', cleanName)
 
-    // Try multiple search variations
-    const searchVariants = [
-        cleanName,
-        cleanName.replace(/\s+/g, ''),  // No spaces
-        cleanName.split(/\s+/)[0],       // First word only
-    ]
-
-    for (const searchTerm of searchVariants) {
-        // 1. Try MyShipTracking public search (scrape-friendly)
+    // VesselFinder scraping - most reliable
+    async function vesselFinderScrape(term) {
         try {
-            const url = `https://www.myshiptracking.com/requests/autocomplete-ede42.php?term=${encodeURIComponent(searchTerm)}`
-            const res = await fetch(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (compatible; ShippingTracker/1.0)',
-                    'Accept': 'application/json',
-                    'Referer': 'https://www.myshiptracking.com/'
-                }
-            })
-            if (res.ok) {
-                const data = await res.json()
-                if (data && Array.isArray(data) && data.length > 0) {
-                    const match = data.find(v => {
-                        const name = (v.label || v.value || '').toUpperCase()
-                        return name.includes(cleanName) || cleanName.includes(name.split(' ')[0])
-                    }) || data[0]
-
-                    // Extract MMSI from the result (format varies)
-                    const mmsiMatch = (match.value || match.label || '').match(/\b(\d{9})\b/)
-                    if (mmsiMatch) {
-                        console.log('Found vessel via MyShipTracking:', match.label, mmsiMatch[1])
-                        return {
-                            mmsi: mmsiMatch[1],
-                            name: (match.label || '').split(' - ')[0].trim(),
-                            source: 'myshiptracking'
-                        }
-                    }
-                }
-            }
-        } catch (err) {
-            console.log('MyShipTracking search failed:', err.message)
-        }
-
-        // 2. Try MarineTraffic public search
-        try {
-            const url = `https://www.marinetraffic.com/en/ais/index/search/all/keyword:${encodeURIComponent(searchTerm)}`
-            const res = await fetch(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (compatible; ShippingTracker/1.0)',
-                    'Accept': 'text/html'
-                }
-            })
-            if (res.ok) {
-                const html = await res.text()
-                // Look for MMSI in the search results page
-                const mmsiMatch = html.match(/mmsi["\s:=]+(\d{9})/i)
-                const nameMatch = html.match(/ship_name["\s:=]+["']?([^"'<>]+)/i)
-                if (mmsiMatch) {
-                    console.log('Found vessel via MarineTraffic:', nameMatch?.[1] || searchTerm, mmsiMatch[1])
-                    return {
-                        mmsi: mmsiMatch[1],
-                        name: nameMatch?.[1] || searchTerm,
-                        source: 'marinetraffic'
-                    }
-                }
-            }
-        } catch (err) {
-            console.log('MarineTraffic search failed:', err.message)
-        }
-
-        // 3. Try Datalastic demo API
-        try {
-            const url = `https://api.datalastic.com/api/v0/vessel?api-key=demo&name=${encodeURIComponent(searchTerm)}`
-            const res = await fetch(url)
-            if (res.ok) {
-                const data = await res.json()
-                if (data && data.data && data.data.length > 0) {
-                    const match = data.data[0]
-                    if (match.mmsi) {
-                        console.log('Found vessel via Datalastic:', match.name, match.mmsi)
-                        return {
-                            mmsi: match.mmsi.toString(),
-                            name: match.name,
-                            imo: match.imo,
-                            type: match.vessel_type,
-                            flag: match.flag,
-                            source: 'datalastic'
-                        }
-                    }
-                }
-            }
-        } catch (err) {
-            console.log('Datalastic search failed:', err.message)
-        }
-
-        // 4. Try VesselFinder public API
-        try {
-            const searchUrl = `https://www.vesselfinder.com/api/pub/search/v1?s=${encodeURIComponent(searchTerm)}`
+            // Step 1: Search page
+            const searchUrl = `https://www.vesselfinder.com/vessels?name=${encodeURIComponent(term)}`
             const res = await fetch(searchUrl, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json'
-                }
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'text/html' }
             })
-            if (res.ok) {
-                const data = await res.json()
-                if (data && Array.isArray(data) && data.length > 0) {
-                    const match = data[0]
-                    if (match.mmsi) {
-                        console.log('Found vessel via VesselFinder:', match.name, match.mmsi)
-                        return {
-                            mmsi: match.mmsi.toString(),
-                            name: match.name,
-                            imo: match.imo,
-                            type: match.type,
-                            flag: match.flag,
-                            source: 'vesselfinder'
-                        }
-                    }
+            if (!res.ok) return null
+            const html = await res.text()
+
+            // Find vessel detail link
+            const detailMatch = html.match(/href="(\/vessels\/details\/\d+[^"]*)"/i) ||
+                html.match(/href="(\/vessels\/[^"\s]+IMO-\d+[^"]*)"/i)
+            if (!detailMatch) return null
+
+            // Step 2: Get MMSI from detail page
+            const detailUrl = 'https://www.vesselfinder.com' + detailMatch[1]
+            const detailRes = await fetch(detailUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'text/html' }
+            })
+            if (!detailRes.ok) return null
+            const detailHtml = await detailRes.text()
+
+            // Extract MMSI with multiple patterns
+            const mmsiMatch = detailHtml.match(/MMSI<\/td>\s*<td[^>]*>(\d{9})/i) ||
+                detailHtml.match(/"mmsi"\s*:\s*"?(\d{9})/i) ||
+                detailHtml.match(/MMSI:\s*(\d{9})/i)
+            if (!mmsiMatch) return null
+
+            // Extract vessel name
+            const nameMatch = detailHtml.match(/<h1[^>]*>([^<]+)<\/h1>/i)
+            console.log('Found vessel via VesselFinder:', nameMatch?.[1]?.trim() || term, mmsiMatch[1])
+            return { mmsi: mmsiMatch[1], name: (nameMatch?.[1] || term).trim(), source: 'vesselfinder' }
+        } catch (err) {
+            console.log('VesselFinder failed:', err.message)
+            return null
+        }
+    }
+
+    // Try exact name first, then first word only
+    const searchVariants = [cleanName, cleanName.split(/\s+/)[0]]
+
+    for (const term of searchVariants) {
+        const result = await vesselFinderScrape(term)
+        if (result) return result
+    }
+
+    // Fallback: Try MyShipTracking autocomplete (fast, returns MMSI in response)
+    try {
+        const url = `https://www.myshiptracking.com/requests/autocomplete-ede42.php?term=${encodeURIComponent(cleanName)}`
+        const res = await fetch(url, {
+            headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.myshiptracking.com/' }
+        })
+        if (res.ok) {
+            const data = await res.json()
+            if (Array.isArray(data) && data.length > 0) {
+                const match = data[0]
+                const mmsiMatch = (match.value || match.label || '').match(/\b(\d{9})\b/)
+                if (mmsiMatch) {
+                    console.log('Found vessel via MyShipTracking:', match.label, mmsiMatch[1])
+                    return { mmsi: mmsiMatch[1], name: (match.label || '').split(' - ')[0].trim(), source: 'myshiptracking' }
                 }
             }
-        } catch (err) {
-            console.log('VesselFinder search failed:', err.message)
         }
+    } catch (err) {
+        console.log('MyShipTracking failed:', err.message)
     }
 
     console.log('Could not find MMSI for vessel:', cleanName)
@@ -505,9 +522,49 @@ async function createVesselFromImport(details, rawText = '') {
 
     // If still no MMSI, we cannot track this vessel with real AIS data
     if (!mmsi) {
-        console.error('ERROR: Could not find MMSI for vessel:', vesselName)
-        console.error('Please provide the MMSI number in the Bill of Lading or manually')
-        return null
+        console.warn('No MMSI found; starting AIS name hunt:', vesselName)
+
+        const originCoords = await geocodePort(details.origin)
+        const destCoords = await geocodePort(details.destination)
+        const boxes = []
+        const originBox = buildBoundingBox(originCoords?.lat, originCoords?.lon, 250)
+        const destBox = buildBoundingBox(destCoords?.lat, destCoords?.lon, 250)
+        if (originBox) boxes.push(originBox)
+        if (destBox) boxes.push(destBox)
+        if (boxes.length === 0) {
+            // fallback to wide box if we have nothing
+            boxes.push([[-90, -180], [90, 180]])
+        }
+
+        const pendingId = `PENDING-${Date.now()}-${Math.floor(Math.random() * 1000)}`
+        const placeholder = {
+            mmsi: pendingId,
+            name: vesselName,
+            origin: details.origin || null,
+            destination: details.destination || null,
+            voyage: details.voyage || null,
+            voyageNo: details.voyage || null,
+            blNumber: details.blNumber || null,
+            shipper: details.shipper || null,
+            consignee: details.consignee || null,
+            originLat: originCoords?.lat ?? null,
+            originLng: originCoords?.lon ?? null,
+            destLat: destCoords?.lat ?? null,
+            destLng: destCoords?.lon ?? null,
+            route: (originCoords && destCoords) ? calculateRoute(
+                originCoords.lat, originCoords.lon, destCoords.lat, destCoords.lon, details.origin, details.destination
+            ) : null,
+            eta: details.eta || null,
+            searching: true,
+            status: 'Searching AIS by name',
+            importedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        }
+
+        trackedVessels.set(pendingId, placeholder)
+        vesselDatabase.push(placeholder)
+        startNameHunt(vesselName, boxes, { ...placeholder })
+        return placeholder
     }
 
     // Get coordinates for origin and destination ports
@@ -535,7 +592,8 @@ async function createVesselFromImport(details, rawText = '') {
         latitude: null,
         longitude: null,
         speed: null,
-        importedAt: new Date().toISOString()
+        importedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
     }
 
     // Compute route (ETA will be calculated once we get live position from Airstream)
@@ -656,7 +714,7 @@ app.get('/api/vessels/search', async (req, res) => {
         (v.mmsi || '').toString().includes(query)
     )
     const unique = Array.from(new Map(matches.map(v => [v.mmsi, v])).values())
-    res.json({ vessels: unique })
+    res.json({ vessels: unique.slice(0, 10) })
 })
 
 app.get('/api/vessels', async (req, res) => {
@@ -666,7 +724,12 @@ app.get('/api/vessels', async (req, res) => {
         bottleneckWarning: v.latitude && v.longitude ? checkBottleneckProximity(v.latitude, v.longitude) : null
     })), ...vessels]
     const uniqueVessels = Array.from(new Map(allVessels.map(v => [v.mmsi, v])).values())
-    res.json({ vessels: uniqueVessels })
+    const sorted = uniqueVessels.sort((a, b) => {
+        const ta = new Date(a.updatedAt || a.importedAt || 0).getTime()
+        const tb = new Date(b.updatedAt || b.importedAt || 0).getTime()
+        return tb - ta
+    })
+    res.json({ vessels: sorted.slice(0, 10) })
 })
 
 app.get('/api/bottlenecks', (req, res) => {
@@ -731,8 +794,13 @@ wss.on('connection', (ws) => {
     const interval = setInterval(() => {
         const combined = [...vesselDatabase, ...Array.from(trackedVessels.values())]
         const unique = Array.from(new Map(combined.map(v => [v.mmsi, v])).values())
-        ws.send(JSON.stringify({ type: 'vessels', data: unique }))
-    }, 5000)
+        const sorted = unique.sort((a, b) => {
+            const ta = new Date(a.updatedAt || a.importedAt || 0).getTime()
+            const tb = new Date(b.updatedAt || b.importedAt || 0).getTime()
+            return tb - ta
+        })
+        ws.send(JSON.stringify({ type: 'vessels', data: sorted.slice(0, 10) }))
+    }, 30000)
     ws.on('close', () => clearInterval(interval))
 })
 
