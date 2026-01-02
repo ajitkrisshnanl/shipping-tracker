@@ -40,6 +40,7 @@ const trackedVessels = new Map()
 
 // AIS Stream API Key (Airstream WebSocket)
 const AIS_API_KEY = process.env.AIS_API_KEY || process.env.AIRSTREAM_API || null
+const DISABLE_AIS_STREAM = process.env.DISABLE_AIS_STREAM === 'true'
 
 // AIS Stream Connection
 let aisSocket = null
