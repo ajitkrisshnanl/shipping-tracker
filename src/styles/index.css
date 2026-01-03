@@ -823,26 +823,387 @@ body {
 }
 
 /* ===================================
-   RESPONSIVE
+   RESPONSIVE - AUTO DETECT MOBILE
    =================================== */
 
+/* Tablet breakpoint */
+@media (max-width: 1024px) {
+  :root {
+    --sidebar-width: 320px;
+  }
+
+  .info-panel {
+    width: 280px;
+  }
+}
+
+/* Mobile breakpoint */
 @media (max-width: 768px) {
+  :root {
+    --sidebar-width: 100%;
+    --header-height: 56px;
+  }
+
+  .app-container {
+    flex-direction: column;
+  }
+
   .sidebar {
-    position: absolute;
-    left: 0;
-    top: 0;
+    position: relative;
     width: 100%;
     height: auto;
-    max-height: 50vh;
+    max-height: 45vh;
+    min-height: 200px;
     border-right: none;
     border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
   }
-  
+
+  .main-content {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .header {
+    height: var(--header-height);
+    padding: 0 16px;
+  }
+
+  .logo-text {
+    font-size: 16px;
+  }
+
+  .logo-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  .logo-icon svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .search-panel {
+    padding: 12px 16px;
+  }
+
+  .search-input {
+    height: 40px;
+    font-size: 16px; /* Prevents iOS zoom on focus */
+  }
+
+  .vessel-list {
+    padding: 8px;
+    max-height: calc(45vh - 180px);
+    overflow-y: auto;
+  }
+
+  .vessel-card {
+    padding: 12px;
+    margin-bottom: 6px;
+  }
+
+  .vessel-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .vessel-name {
+    font-size: 13px;
+  }
+
+  .vessel-type {
+    font-size: 11px;
+  }
+
+  .vessel-route {
+    padding: 8px 0;
+    margin: 8px 0;
+  }
+
+  .route-port-name {
+    font-size: 12px;
+  }
+
+  .vessel-meta {
+    gap: 6px;
+  }
+
+  .meta-value {
+    font-size: 12px;
+  }
+
+  .alerts-panel {
+    padding: 8px;
+    max-height: 120px;
+  }
+
+  .alert-card {
+    padding: 8px;
+    margin-bottom: 6px;
+  }
+
+  .alert-title {
+    font-size: 11px;
+  }
+
+  .alert-description {
+    font-size: 10px;
+  }
+
+  /* Info panel - bottom sheet on mobile */
   .info-panel {
-    width: calc(100% - 32px);
-    bottom: 16px;
+    position: fixed;
     top: auto;
-    right: 16px;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-height: 60vh;
+    border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;
+    animation: slideUp 0.3s ease-out;
+    overflow-y: auto;
+  }
+
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(100%);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .info-panel-header {
+    padding: 12px 16px;
+    position: sticky;
+    top: 0;
+    background: var(--bg-glass);
+    backdrop-filter: blur(20px);
+    z-index: 10;
+  }
+
+  .info-panel-title {
+    font-size: 15px;
+  }
+
+  .info-panel-content {
+    padding: 12px 16px 24px;
+  }
+
+  .info-row {
+    padding: 5px 0;
+  }
+
+  .info-label, .info-value {
+    font-size: 12px;
+  }
+
+  .eta-highlight {
+    padding: 10px;
+  }
+
+  .eta-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  .eta-date {
+    font-size: 14px;
+  }
+
+  /* Map controls positioning */
+  .leaflet-control-zoom {
+    margin-right: 10px !important;
+    margin-bottom: 10px !important;
+  }
+
+  .leaflet-control-zoom a {
+    width: 40px !important;
+    height: 40px !important;
+    line-height: 40px !important;
+    font-size: 20px !important;
+  }
+
+  /* Import button */
+  .sidebar > div[style] {
+    padding: 0 16px 8px !important;
+  }
+}
+
+/* Small mobile breakpoint */
+@media (max-width: 480px) {
+  :root {
+    --header-height: 50px;
+  }
+
+  .sidebar {
+    max-height: 40vh;
+  }
+
+  .header {
+    padding: 0 12px;
+    gap: 8px;
+  }
+
+  .logo-text {
+    font-size: 14px;
+  }
+
+  .logo-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .connection-status {
+    font-size: 11px;
+  }
+
+  .search-panel {
+    padding: 10px 12px;
+  }
+
+  .vessel-list {
+    padding: 6px;
+  }
+
+  .vessel-card {
+    padding: 10px;
+  }
+
+  .vessel-header {
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  .vessel-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  .vessel-status {
+    padding: 3px 6px;
+    font-size: 10px;
+  }
+
+  .route-port-label {
+    font-size: 9px;
+  }
+
+  .route-port-name {
+    font-size: 11px;
+  }
+
+  .meta-label {
+    font-size: 9px;
+  }
+
+  .meta-value {
+    font-size: 11px;
+  }
+
+  .info-panel {
+    max-height: 70vh;
+  }
+
+  .info-section-title {
+    font-size: 10px;
+  }
+
+  .empty-state {
+    padding: 20px;
+  }
+
+  .empty-state-icon {
+    width: 48px;
+    height: 48px;
+  }
+
+  .empty-state-title {
+    font-size: 13px;
+  }
+
+  .empty-state-text {
+    font-size: 11px;
+  }
+}
+
+/* Landscape mobile */
+@media (max-width: 768px) and (orientation: landscape) {
+  .app-container {
+    flex-direction: row;
+  }
+
+  .sidebar {
+    width: 280px;
+    max-height: 100vh;
+    height: 100%;
+    border-right: 1px solid var(--border-subtle);
+    border-bottom: none;
+  }
+
+  .vessel-list {
+    max-height: calc(100vh - 180px);
+  }
+
+  .info-panel {
+    position: absolute;
+    top: 10px;
+    bottom: auto;
+    left: auto;
+    right: 10px;
+    width: 280px;
+    max-height: calc(100vh - 20px);
+    border-radius: var(--border-radius-lg);
+    animation: slideIn 0.3s ease-out;
+  }
+}
+
+/* Touch-friendly tap targets */
+@media (pointer: coarse) {
+  .vessel-card {
+    min-height: 44px;
+  }
+
+  .search-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .close-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .alert-card {
+    min-height: 44px;
+  }
+
+  .upload-btn,
+  .primary-btn,
+  .secondary-btn {
+    min-height: 48px;
+  }
+}
+
+/* Safe area insets for notched devices */
+@supports (padding: max(0px)) {
+  @media (max-width: 768px) {
+    .header {
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
+    }
+
+    .info-panel {
+      padding-bottom: max(16px, env(safe-area-inset-bottom));
+    }
+
+    .vessel-list {
+      padding-left: max(8px, env(safe-area-inset-left));
+      padding-right: max(8px, env(safe-area-inset-right));
+    }
   }
 }
 
@@ -1091,4 +1452,94 @@ body {
 
 .primary-btn:hover {
   box-shadow: var(--accent-glow);
+}
+
+/* Import panel responsive */
+@media (max-width: 768px) {
+  .import-panel {
+    width: calc(100% - 32px);
+    max-width: 480px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+  }
+
+  .import-header {
+    padding: 14px 16px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .import-content {
+    padding: 16px;
+  }
+
+  .drop-zone {
+    padding: 24px 16px;
+  }
+
+  .upload-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .drop-zone p {
+    font-size: 14px;
+  }
+
+  .file-hint {
+    font-size: 11px;
+  }
+
+  .extracted-data-card {
+    padding: 12px;
+  }
+
+  .data-row .label {
+    font-size: 12px;
+  }
+
+  .data-row .value {
+    font-size: 13px;
+  }
+
+  .action-buttons {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .action-buttons button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .import-panel {
+    width: calc(100% - 24px);
+    margin: 12px;
+  }
+
+  .import-header h3 {
+    font-size: 15px;
+  }
+
+  .import-content {
+    padding: 12px;
+  }
+
+  .drop-zone {
+    padding: 20px 12px;
+  }
+
+  .selected-file {
+    padding: 8px 12px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .upload-btn {
+    padding: 14px;
+    font-size: 15px;
+  }
 }
