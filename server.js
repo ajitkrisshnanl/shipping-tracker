@@ -182,8 +182,10 @@ async function handleAisMessage(message) {
         updated.bottleneckWarning = checkBottleneckProximity(updated.latitude, updated.longitude)
     }
 
-    // Update route/ETA if we have origin and destination
-    if (updated.origin && updated.destination && updated.latitude && updated.longitude) {
+    // Ensure port coords if missing (async geocode) and update route/ETA
+    await ensurePortCoordinates(updated)
+
+    if (updated.origin && updated.destination && updated.latitude && updated.longitude && updated.route) {
         const route = calculateRoute(
             updated.originLat || updated.latitude,
             updated.originLng || updated.longitude,
@@ -456,6 +458,54 @@ async function geocodePort(portName) {
     console.error('All geocode attempts failed for:', portName)
     geocodeCache.set(cacheKey, null)
     return null
+}
+
+async function ensurePortCoordinates(vessel) {
+    if (!vessel) return vessel
+    let updated = false
+
+    const setOrigin = async () => {
+        if (vessel.origin && (!vessel.originLat || !vessel.originLng)) {
+            const o = await geocodePort(vessel.origin)
+            if (o) {
+                vessel.originLat = o.lat
+                vessel.originLng = o.lon
+                updated = true
+            }
+        }
+    }
+
+    const setDest = async () => {
+        if (vessel.destination && (!vessel.destLat || !vessel.destLng)) {
+            const d = await geocodePort(vessel.destination)
+            if (d) {
+                vessel.destLat = d.lat
+                vessel.destLng = d.lon
+                updated = true
+            }
+        }
+    }
+
+    await Promise.all([setOrigin(), setDest()])
+
+    if (updated && vessel.originLat && vessel.destLat) {
+        vessel.route = calculateRoute(
+            vessel.originLat,
+            vessel.originLng,
+            vessel.destLat,
+            vessel.destLng,
+            vessel.origin,
+            vessel.destination
+        )
+        if (vessel.latitude && vessel.longitude) {
+            const etaCalc = estimateArrival(vessel.route, vessel.latitude, vessel.longitude, vessel.speed || 12)
+            vessel.eta = vessel.eta || etaCalc?.eta
+            vessel.distanceRemainingNm = etaCalc?.distanceRemaining || null
+            vessel.hoursRemaining = etaCalc?.hoursRemaining || null
+        }
+    }
+
+    return vessel
 }
 
 // Fetch marine conditions (Open-Meteo free API)
@@ -782,7 +832,9 @@ async function createVesselFromImport(details, rawText = '') {
         updatedAt: vesselStatus?.lastUpdate || new Date().toISOString()
     }
 
-    // Compute route
+    // Ensure coords if missing (retry geocode) and compute route
+    await ensurePortCoordinates(vessel)
+
     if (vessel.origin && vessel.destination && vessel.originLat && vessel.destLat) {
         const route = calculateRoute(
             vessel.originLat,
@@ -977,45 +1029,7 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
         enriched.weather = await getMarineConditions(enriched.latitude, enriched.longitude)
     }
 
-    // Re-geocode on-the-fly if coordinates are missing but port names exist
-    if (enriched.origin && !enriched.originLat) {
-        console.log('Re-geocoding origin:', enriched.origin)
-        const originCoords = await geocodePort(enriched.origin)
-        if (originCoords) {
-            enriched.originLat = originCoords.lat
-            enriched.originLng = originCoords.lon
-            // Update stored data
-            const dbIdx = vesselDatabase.findIndex(v => v.mmsi === mmsi)
-            if (dbIdx >= 0) {
-                vesselDatabase[dbIdx].originLat = originCoords.lat
-                vesselDatabase[dbIdx].originLng = originCoords.lon
-            }
-            if (trackedVessels.has(mmsi)) {
-                const tv = trackedVessels.get(mmsi)
-                tv.originLat = originCoords.lat
-                tv.originLng = originCoords.lon
-            }
-        }
-    }
-    if (enriched.destination && !enriched.destLat) {
-        console.log('Re-geocoding destination:', enriched.destination)
-        const destCoords = await geocodePort(enriched.destination)
-        if (destCoords) {
-            enriched.destLat = destCoords.lat
-            enriched.destLng = destCoords.lon
-            // Update stored data
-            const dbIdx = vesselDatabase.findIndex(v => v.mmsi === mmsi)
-            if (dbIdx >= 0) {
-                vesselDatabase[dbIdx].destLat = destCoords.lat
-                vesselDatabase[dbIdx].destLng = destCoords.lon
-            }
-            if (trackedVessels.has(mmsi)) {
-                const tv = trackedVessels.get(mmsi)
-                tv.destLat = destCoords.lat
-                tv.destLng = destCoords.lon
-            }
-        }
-    }
+    await ensurePortCoordinates(enriched)
 
     // Calculate route if we have origin/dest coordinates (even without live position)
     if (enriched.origin && enriched.destination && enriched.originLat && enriched.destLat) {
