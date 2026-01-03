@@ -93,10 +93,11 @@ function calculateShippingRoute(origin, destination, originName, destName) {
     const originInGulf = originLat > 15 && originLat < 32 && originLng > 45 && originLng < 60
     const originInAsia = originLng > 60 && originLng < 145
     const destInUSEast = destLng > -85 && destLng < -65 && destLat > 25 && destLat < 45
+    const destInAmericasEast = destLng < -30 && destLng > -100
     const destInEurope = destLat > 35 && destLng > -15 && destLng < 35
 
     // India to US East Coast (Kolkata to Norfolk)
-    if (originInIndia && destInUSEast) {
+    if (originInIndia && (destInUSEast || destInAmericasEast)) {
         route.push({ ...waypoints.babElMandeb, name: 'Bab el-Mandeb', type: 'passage' })
         route.push({ ...waypoints.suezSouth, name: 'Suez (South)', type: 'passage' })
         route.push({ ...waypoints.suezNorth, name: 'Suez (North)', type: 'passage' })
@@ -104,7 +105,7 @@ function calculateShippingRoute(origin, destination, originName, destName) {
         route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
     }
     // Gulf (Bahrain) to US East/New York
-    else if (originInGulf && destInUSEast) {
+    else if (originInGulf && (destInUSEast || destInAmericasEast)) {
         route.push({ ...waypoints.hormuz, name: 'Strait of Hormuz', type: 'passage' })
         route.push({ ...waypoints.babElMandeb, name: 'Bab el-Mandeb', type: 'passage' })
         route.push({ ...waypoints.suezSouth, name: 'Suez (South)', type: 'passage' })
@@ -113,7 +114,7 @@ function calculateShippingRoute(origin, destination, originName, destName) {
         route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
     }
     // Asia to US East via Suez
-    else if (originInAsia && destInUSEast) {
+    else if (originInAsia && (destInUSEast || destInAmericasEast)) {
         route.push({ ...waypoints.singapore, name: 'Singapore', type: 'port' })
         route.push({ ...waypoints.malaccaStrait, name: 'Malacca Strait', type: 'passage' })
         route.push({ ...waypoints.babElMandeb, name: 'Bab el-Mandeb', type: 'passage' })
@@ -391,6 +392,9 @@ function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
                 ref={mapRef}
                 center={[20, 0]}
                 zoom={2}
+                minZoom={2}
+                maxBounds={[[-85, -180], [85, 180]]}
+                maxBoundsViscosity={1.0}
                 style={{ width: '100%', height: '100%' }}
                 zoomControl={true}
                 scrollWheelZoom={true}
@@ -401,6 +405,7 @@ function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
                 <TileLayer
                     url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
                     attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                    noWrap={true}
                 />
 
                 {/* Map controller for animations */}

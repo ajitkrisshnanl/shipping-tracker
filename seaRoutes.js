@@ -6,53 +6,53 @@
 // Major shipping waypoints (key maritime passages and ports)
 const waypoints = {
     // Asia
-    kolkata: { lat: 22.5726, lng: 88.3639, name: 'Kolkata' },
-    singapore: { lat: 1.2897, lng: 103.8501, name: 'Singapore' },
-    hongkong: { lat: 22.3193, lng: 114.1694, name: 'Hong Kong' },
-    shanghai: { lat: 31.2304, lng: 121.4737, name: 'Shanghai' },
-    tokyo: { lat: 35.6762, lng: 139.6503, name: 'Tokyo' },
-    busan: { lat: 35.1796, lng: 129.0756, name: 'Busan' },
-    mumbai: { lat: 19.0760, lng: 72.8777, name: 'Mumbai' },
+    kolkata: { lat: 22.5726, lng: 88.3639, name: 'Kolkata', type: 'port' },
+    singapore: { lat: 1.2897, lng: 103.8501, name: 'Singapore', type: 'port' },
+    hongkong: { lat: 22.3193, lng: 114.1694, name: 'Hong Kong', type: 'port' },
+    shanghai: { lat: 31.2304, lng: 121.4737, name: 'Shanghai', type: 'port' },
+    tokyo: { lat: 35.6762, lng: 139.6503, name: 'Tokyo', type: 'port' },
+    busan: { lat: 35.1796, lng: 129.0756, name: 'Busan', type: 'port' },
+    mumbai: { lat: 19.0760, lng: 72.8777, name: 'Mumbai', type: 'port' },
 
     // Middle East
-    dubai: { lat: 25.2048, lng: 55.2708, name: 'Dubai' },
-    bahrain: { lat: 26.0667, lng: 50.5577, name: 'Bahrain' },
-    jeddah: { lat: 21.4858, lng: 39.1925, name: 'Jeddah' },
+    dubai: { lat: 25.2048, lng: 55.2708, name: 'Dubai', type: 'port' },
+    bahrain: { lat: 26.0667, lng: 50.5577, name: 'Bahrain', type: 'port' },
+    jeddah: { lat: 21.4858, lng: 39.1925, name: 'Jeddah', type: 'port' },
 
     // Key Passages
-    malaccaStrait: { lat: 4.2105, lng: 100.2808, name: 'Malacca Strait' },
-    babElMandeb: { lat: 12.5833, lng: 43.3333, name: 'Bab el-Mandeb' },
-    suezNorth: { lat: 31.2653, lng: 32.3019, name: 'Suez Canal (North)' },
-    suezSouth: { lat: 29.9511, lng: 32.5503, name: 'Suez Canal (South)' },
-    gibraltar: { lat: 35.9667, lng: -5.5000, name: 'Gibraltar' },
-    capeOfGoodHope: { lat: -34.3568, lng: 18.4740, name: 'Cape of Good Hope' },
-    panamaAtlantic: { lat: 9.3817, lng: -79.9181, name: 'Panama (Atlantic)' },
-    panamaPacific: { lat: 8.9500, lng: -79.5667, name: 'Panama (Pacific)' },
+    malaccaStrait: { lat: 4.2105, lng: 100.2808, name: 'Malacca Strait', type: 'passage' },
+    babElMandeb: { lat: 12.5833, lng: 43.3333, name: 'Bab el-Mandeb', type: 'passage' },
+    suezNorth: { lat: 31.2653, lng: 32.3019, name: 'Suez Canal (North)', type: 'passage' },
+    suezSouth: { lat: 29.9511, lng: 32.5503, name: 'Suez Canal (South)', type: 'passage' },
+    gibraltar: { lat: 35.9667, lng: -5.5000, name: 'Gibraltar', type: 'passage' },
+    capeOfGoodHope: { lat: -34.3568, lng: 18.4740, name: 'Cape of Good Hope', type: 'passage' },
+    panamaAtlantic: { lat: 9.3817, lng: -79.9181, name: 'Panama (Atlantic)', type: 'passage' },
+    panamaPacific: { lat: 8.9500, lng: -79.5667, name: 'Panama (Pacific)', type: 'passage' },
 
     // Europe
-    rotterdam: { lat: 51.9225, lng: 4.4792, name: 'Rotterdam' },
-    hamburg: { lat: 53.5511, lng: 9.9937, name: 'Hamburg' },
-    antwerp: { lat: 51.2194, lng: 4.4025, name: 'Antwerp' },
-    felixstowe: { lat: 51.9543, lng: 1.3510, name: 'Felixstowe' },
+    rotterdam: { lat: 51.9225, lng: 4.4792, name: 'Rotterdam', type: 'port' },
+    hamburg: { lat: 53.5511, lng: 9.9937, name: 'Hamburg', type: 'port' },
+    antwerp: { lat: 51.2194, lng: 4.4025, name: 'Antwerp', type: 'port' },
+    felixstowe: { lat: 51.9543, lng: 1.3510, name: 'Felixstowe', type: 'port' },
 
     // Mediterranean
-    algeciras: { lat: 36.1408, lng: -5.4536, name: 'Algeciras' },
-    piraeus: { lat: 37.9475, lng: 23.6371, name: 'Piraeus' },
-    genoa: { lat: 44.4056, lng: 8.9463, name: 'Genoa' },
+    algeciras: { lat: 36.1408, lng: -5.4536, name: 'Algeciras', type: 'port' },
+    piraeus: { lat: 37.9475, lng: 23.6371, name: 'Piraeus', type: 'port' },
+    genoa: { lat: 44.4056, lng: 8.9463, name: 'Genoa', type: 'port' },
 
     // Americas
-    newyork: { lat: 40.6892, lng: -74.0445, name: 'New York' },
-    norfolk: { lat: 36.8508, lng: -76.2859, name: 'Norfolk, VA' },
-    savannah: { lat: 32.0809, lng: -81.0912, name: 'Savannah' },
-    charleston: { lat: 32.7765, lng: -79.9311, name: 'Charleston' },
-    houston: { lat: 29.7604, lng: -95.3698, name: 'Houston' },
-    miami: { lat: 25.7617, lng: -80.1918, name: 'Miami' },
-    losangeles: { lat: 33.7395, lng: -118.2611, name: 'Los Angeles' },
+    newyork: { lat: 40.6892, lng: -74.0445, name: 'New York', type: 'port' },
+    norfolk: { lat: 36.8508, lng: -76.2859, name: 'Norfolk, VA', type: 'port' },
+    savannah: { lat: 32.0809, lng: -81.0912, name: 'Savannah', type: 'port' },
+    charleston: { lat: 32.7765, lng: -79.9311, name: 'Charleston', type: 'port' },
+    houston: { lat: 29.7604, lng: -95.3698, name: 'Houston', type: 'port' },
+    miami: { lat: 25.7617, lng: -80.1918, name: 'Miami', type: 'port' },
+    losangeles: { lat: 33.7395, lng: -118.2611, name: 'Los Angeles', type: 'port' },
 
     // Africa
-    capeTown: { lat: -33.9249, lng: 18.4241, name: 'Cape Town' },
-    durban: { lat: -29.8587, lng: 31.0218, name: 'Durban' },
-    mombasa: { lat: -4.0435, lng: 39.6682, name: 'Mombasa' }
+    capeTown: { lat: -33.9249, lng: 18.4241, name: 'Cape Town', type: 'port' },
+    durban: { lat: -29.8587, lng: 31.0218, name: 'Durban', type: 'port' },
+    mombasa: { lat: -4.0435, lng: 39.6682, name: 'Mombasa', type: 'port' }
 }
 
 // Common routes through major passages
@@ -114,11 +114,12 @@ function calculateRoute(originLat, originLng, destLat, destLng, originName, dest
     const destInAmericas = destLng < -30
     const destInEurope = destLat > 35 && destLng > -15 && destLng < 35
     const destInUSEast = destLng > -85 && destLng < -65 && destLat > 25 && destLat < 45
+    const destInAmericasEast = destLng < -30 && destLng > -100
     const destInUSWest = destLng < -115 && destLat > 25 && destLat < 50
     const destInAsia = destLng > 60 && destLng < 145
 
     // India to US East Coast (like Kolkata to Norfolk)
-    if (originInIndia && destInUSEast) {
+    if (originInIndia && (destInUSEast || destInAmericasEast)) {
         // Via Suez Canal route
         route.push(waypoints.babElMandeb)
         route.push(waypoints.suezSouth)
@@ -128,8 +129,8 @@ function calculateRoute(originLat, originLng, destLat, destLng, originName, dest
         route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
     }
     // Gulf (Bahrain) to US East
-    else if (originInGulf && destInUSEast) {
-        route.push({ lat: 26.0, lng: 56.0, name: 'Strait of Hormuz', type: 'waypoint' })
+    else if (originInGulf && (destInUSEast || destInAmericasEast)) {
+        route.push({ lat: 26.0, lng: 56.0, name: 'Strait of Hormuz', type: 'passage' })
         route.push(waypoints.babElMandeb)
         route.push(waypoints.suezSouth)
         route.push(waypoints.suezNorth)
@@ -137,7 +138,7 @@ function calculateRoute(originLat, originLng, destLat, destLng, originName, dest
         route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
     }
     // Asia to US East Coast via Suez
-    else if (originInAsia && destInUSEast) {
+    else if (originInAsia && (destInUSEast || destInAmericasEast)) {
         route.push(waypoints.singapore)
         route.push(waypoints.malaccaStrait)
         route.push(waypoints.babElMandeb)

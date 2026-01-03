@@ -227,7 +227,7 @@ async function refreshPositionForVessel(vessel, options = {}) {
 
         if (updated.latitude && updated.longitude) {
             const etaCalc = estimateArrival(route, updated.latitude, updated.longitude, updated.speed || 12)
-            updated.eta = updated.eta || etaCalc?.eta
+            updated.eta = etaCalc?.eta || updated.eta
             updated.distanceRemainingNm = etaCalc?.distanceRemaining || null
             updated.hoursRemaining = etaCalc?.hoursRemaining || null
         }
@@ -687,7 +687,7 @@ async function ensurePortCoordinates(vessel) {
         )
         if (vessel.latitude && vessel.longitude) {
             const etaCalc = estimateArrival(vessel.route, vessel.latitude, vessel.longitude, vessel.speed || 12)
-            vessel.eta = vessel.eta || etaCalc?.eta
+            vessel.eta = etaCalc?.eta || vessel.eta
             vessel.distanceRemainingNm = etaCalc?.distanceRemaining || null
             vessel.hoursRemaining = etaCalc?.hoursRemaining || null
         }
@@ -991,7 +991,7 @@ async function createVesselFromImport(details, rawText = '') {
         // Calculate ETA if we have live position
         if (vessel.latitude && vessel.longitude) {
             const etaCalc = estimateArrival(route, vessel.latitude, vessel.longitude, vessel.speed || 12)
-            vessel.eta = vesselStatus?.eta || etaCalc?.eta || details.eta || null
+            vessel.eta = etaCalc?.eta || details.eta || vesselStatus?.eta || null
             vessel.distanceRemainingNm = etaCalc?.distanceRemaining || null
             vessel.hoursRemaining = etaCalc?.hoursRemaining || null
         } else {
@@ -1171,7 +1171,7 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
             enriched.vesselType = vesselStatus.vesselType || enriched.shipType
             enriched.imo = vesselStatus.imo || enriched.imo
             enriched.grossTonnage = vesselStatus.grossTonnage || enriched.grossTonnage
-            enriched.eta = vesselStatus.eta || enriched.eta
+            enriched.eta = enriched.eta || vesselStatus.eta
             enriched.statusSource = 'vesselfinder-api'
             enriched.statusUpdatedAt = vesselStatus.lastUpdate
 
@@ -1219,7 +1219,7 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
         // Calculate ETA only if we have current position
         if (enriched.latitude && enriched.longitude) {
             const etaCalc = estimateArrival(route, enriched.latitude, enriched.longitude, enriched.speed || 12)
-            enriched.eta = enriched.eta || etaCalc?.eta
+            enriched.eta = etaCalc?.eta || enriched.eta
             enriched.distanceRemainingNm = etaCalc?.distanceRemaining || null
             enriched.hoursRemaining = etaCalc?.hoursRemaining || null
         }
