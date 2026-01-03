@@ -398,30 +398,7 @@ async function geocodePort(portName) {
     const variants = simplifyPortName(portName)
     console.log('Geocoding port:', portName, '- trying variants:', variants.slice(0, 3).join(', '))
 
-    // Try Photon (Komoot's OSM-based geocoder) first - more permissive
-    for (const searchTerm of variants.slice(0, 3)) {
-        try {
-            const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(searchTerm)}&limit=1`
-            const res = await fetch(photonUrl, {
-                headers: { 'Accept': 'application/json' }
-            })
-
-            if (res.ok) {
-                const data = await res.json()
-                if (data.features && data.features[0]) {
-                    const [lon, lat] = data.features[0].geometry.coordinates
-                    const coords = { lat: Number(lat), lon: Number(lon) }
-                    console.log('Geocoded (Photon)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
-                    geocodeCache.set(cacheKey, coords)
-                    return coords
-                }
-            }
-        } catch (err) {
-            console.log('Photon geocode error:', err.message)
-        }
-    }
-
-    // Fallback to Nominatim with proper headers
+    // Nominatim with proper headers (Render-friendly)
     for (const searchTerm of variants) {
         const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(searchTerm)}`
         try {
