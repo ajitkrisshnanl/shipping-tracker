@@ -390,63 +390,60 @@ async function getMarineConditions(lat, lon) {
     }
 }
 
-// Scrape LIVE position data from VesselFinder by MMSI
-async function scrapeLivePosition(mmsi) {
+// Get vessel status from VesselFinder click API
+// Note: Free tier doesn't include coordinates, but gives speed/course/destination
+async function getVesselStatus(mmsi) {
     if (!mmsi) return null
     try {
-        const url = `https://www.vesselfinder.com/vessels/details/${mmsi}`
+        const url = `https://www.vesselfinder.com/api/pub/click/${mmsi}`
         const res = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'text/html' }
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+                'Referer': 'https://www.vesselfinder.com/'
+            }
         })
         if (!res.ok) return null
-        const html = await res.text()
+        const data = await res.json()
 
-        // Extract coordinates - multiple patterns
-        const latMatch = html.match(/Latitude[:\s<\/tdspan>]*(-?\d+\.?\d*)/i) ||
-            html.match(/"latitude"[:\s]*(-?\d+\.?\d*)/i) ||
-            html.match(/lat[:\s="']*(-?\d+\.\d+)/i)
-        const lngMatch = html.match(/Longitude[:\s<\/tdspan>]*(-?\d+\.?\d*)/i) ||
-            html.match(/"longitude"[:\s]*(-?\d+\.?\d*)/i) ||
-            html.match(/lon[:\s="']*(-?\d+\.\d+)/i)
-
-        // Extract speed
-        const speedMatch = html.match(/Speed[:\s<\/tdspan>]*(\d+\.?\d*)\s*(?:kn|knots)/i) ||
-            html.match(/"speed"[:\s]*(\d+\.?\d*)/i) ||
-            html.match(/SOG[:\s<\/tdspan>]*(\d+\.?\d*)/i)
-
-        // Extract heading/course
-        const headingMatch = html.match(/Heading[:\s<\/tdspan>]*(\d+)/i) ||
-            html.match(/Course[:\s<\/tdspan>]*(\d+)/i) ||
-            html.match(/"heading"[:\s]*(\d+)/i) ||
-            html.match(/COG[:\s<\/tdspan>]*(\d+)/i)
-
-        // Extract destination from AIS
-        const destMatch = html.match(/Destination[:\s<\/tdspan>]*([A-Z][A-Z0-9\s,.-]+)/i)
-
-        const lat = latMatch ? parseFloat(latMatch[1]) : null
-        const lng = lngMatch ? parseFloat(lngMatch[1]) : null
-
-        if (!lat || !lng || lat === 0 || lng === 0) {
-            console.log('No live position found for MMSI:', mmsi)
-            return null
+        // VesselFinder click API returns:
+        // ss = speed, cu = course, dest = destination, ts = timestamp
+        // name, imo, country, type, gt (gross tonnage), etc.
+        const status = {
+            speed: data.ss ?? null,
+            heading: data.cu ?? null,
+            currentDestination: data.dest || null,
+            vesselType: data.type || null,
+            country: data.country || null,
+            imo: data.imo || null,
+            grossTonnage: data.gt || null,
+            lastUpdate: data.ts ? new Date(data.ts * 1000).toISOString() : null,
+            source: 'vesselfinder-api'
         }
 
-        const position = {
-            latitude: lat,
-            longitude: lng,
-            speed: speedMatch ? parseFloat(speedMatch[1]) : null,
-            heading: headingMatch ? parseInt(headingMatch[1]) : null,
-            destination: destMatch ? destMatch[1].trim() : null,
-            source: 'vesselfinder-scrape',
-            updatedAt: new Date().toISOString()
-        }
-
-        console.log('Scraped live position for', mmsi, ':', position.latitude, position.longitude, position.speed, 'kn')
-        return position
+        console.log('VesselFinder status for', mmsi, ':', status.speed, 'kn, dest:', status.currentDestination)
+        return status
     } catch (err) {
-        console.error('Live position scrape failed:', err.message)
+        console.error('VesselFinder status fetch failed:', err.message)
         return null
     }
+}
+
+// Attempt to get live position - uses AIS Stream data if available in cache
+// VesselFinder free tier doesn't provide coordinates
+function getLivePosition(mmsi) {
+    const tracked = trackedVessels.get(mmsi?.toString())
+    if (tracked && tracked.latitude && tracked.longitude) {
+        return {
+            latitude: tracked.latitude,
+            longitude: tracked.longitude,
+            speed: tracked.speed,
+            heading: tracked.heading || tracked.cog,
+            source: tracked.positionSource || 'ais-stream',
+            updatedAt: tracked.updatedAt
+        }
+    }
+    return null
 }
 
 function extractMmsiFromText(text) {
@@ -661,22 +658,26 @@ async function createVesselFromImport(details, rawText = '') {
         return placeholder
     }
 
-    // Get coordinates for origin and destination ports + LIVE position
-    const [originCoords, destCoords, livePosition] = await Promise.all([
+    // Get coordinates for origin and destination ports + vessel status from VesselFinder
+    const [originCoords, destCoords, vesselStatus] = await Promise.all([
         geocodePort(details.origin),
         geocodePort(details.destination),
-        scrapeLivePosition(mmsi)
+        getVesselStatus(mmsi)
     ])
     console.log('Geocode results:', { origin: details.origin, originCoords, destination: details.destination, destCoords })
-    console.log('Live position:', livePosition)
+    console.log('Vessel status from VesselFinder:', vesselStatus)
+
+    // Check if we have cached position from AIS Stream
+    const cachedPosition = getLivePosition(mmsi)
 
     const vessel = {
         mmsi: mmsi.toString(),
         name: vesselInfo?.name || vesselName,
-        imo: vesselInfo?.imo || null,
-        flag: vesselInfo?.flag || null,
-        shipType: vesselInfo?.type || null,
+        imo: vesselStatus?.imo || vesselInfo?.imo || null,
+        flag: vesselStatus?.country || vesselInfo?.flag || null,
+        shipType: vesselStatus?.vesselType || vesselInfo?.type || null,
         destination: details.destination || null,
+        currentDestination: vesselStatus?.currentDestination || null, // Current AIS destination
         origin: details.origin || null,
         voyage: details.voyage || null,
         voyageNo: details.voyage || null,
@@ -687,14 +688,15 @@ async function createVesselFromImport(details, rawText = '') {
         originLng: originCoords?.lon ?? null,
         destLat: destCoords?.lat ?? null,
         destLng: destCoords?.lon ?? null,
-        // Live position from scraping (or null if not available yet)
-        latitude: livePosition?.latitude ?? null,
-        longitude: livePosition?.longitude ?? null,
-        speed: livePosition?.speed ?? null,
-        heading: livePosition?.heading ?? null,
-        positionSource: livePosition?.source ?? null,
+        // Live position from AIS Stream cache (VesselFinder API doesn't provide coords)
+        latitude: cachedPosition?.latitude ?? null,
+        longitude: cachedPosition?.longitude ?? null,
+        speed: vesselStatus?.speed ?? cachedPosition?.speed ?? null,
+        heading: vesselStatus?.heading ?? cachedPosition?.heading ?? null,
+        positionSource: cachedPosition?.source ?? vesselStatus?.source ?? null,
+        grossTonnage: vesselStatus?.grossTonnage || null,
         importedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        updatedAt: vesselStatus?.lastUpdate || new Date().toISOString()
     }
 
     // Compute route
@@ -858,21 +860,28 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
 
     const enriched = { ...vessel }
 
-    // Check if we need to scrape fresh position data
-    // Scrape if: no position, or position is older than 15 minutes, or not from a real source
-    const positionAge = enriched.updatedAt ? (Date.now() - new Date(enriched.updatedAt).getTime()) / 1000 / 60 : Infinity
-    const needsFreshPosition = !enriched.latitude || !enriched.longitude || positionAge > 15 || !mmsi.match(/^\d{9}$/)
+    // Always refresh vessel status from VesselFinder API (speed, heading, current destination)
+    if (mmsi.match(/^\d{9}$/)) {
+        const vesselStatus = await getVesselStatus(mmsi)
+        if (vesselStatus) {
+            enriched.speed = vesselStatus.speed ?? enriched.speed
+            enriched.heading = vesselStatus.heading ?? enriched.heading
+            enriched.currentDestination = vesselStatus.currentDestination || enriched.currentDestination
+            enriched.vesselType = vesselStatus.vesselType || enriched.shipType
+            enriched.imo = vesselStatus.imo || enriched.imo
+            enriched.grossTonnage = vesselStatus.grossTonnage || enriched.grossTonnage
+            enriched.statusSource = 'vesselfinder-api'
+            enriched.statusUpdatedAt = vesselStatus.lastUpdate
 
-    if (needsFreshPosition && mmsi.match(/^\d{9}$/)) {
-        console.log('Scraping fresh position for', mmsi, '(age:', Math.round(positionAge), 'min)')
-        const livePosition = await scrapeLivePosition(mmsi)
-        if (livePosition) {
-            enriched.latitude = livePosition.latitude
-            enriched.longitude = livePosition.longitude
-            enriched.speed = livePosition.speed ?? enriched.speed
-            enriched.heading = livePosition.heading ?? enriched.heading
-            enriched.positionSource = livePosition.source
-            enriched.updatedAt = livePosition.updatedAt
+            // Note: VesselFinder free tier doesn't provide coordinates
+            // Coordinates come from AIS Stream WebSocket
+            const cachedPosition = getLivePosition(mmsi)
+            if (cachedPosition) {
+                enriched.latitude = cachedPosition.latitude
+                enriched.longitude = cachedPosition.longitude
+                enriched.positionSource = cachedPosition.source
+                enriched.updatedAt = cachedPosition.updatedAt
+            }
 
             // Update stored vessel data
             trackedVessels.set(mmsi, { ...trackedVessels.get(mmsi), ...enriched })
