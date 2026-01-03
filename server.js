@@ -15,7 +15,7 @@ const pdfParse = require('pdf-parse')
 const { GoogleGenerativeAI } = require('@google/generative-ai')
 const OpenAI = require('openai')
 const nodemailer = require('nodemailer')
-const { getBottlenecks, checkBottleneckProximity } = require('./bottlenecks')
+const { getBottlenecks, checkBottleneckProximity, estimateRouteDelay } = require('./bottlenecks')
 const { calculateRoute, estimateArrival } = require('./seaRoutes')
 
 // Initialize Gemini client
@@ -263,23 +263,80 @@ async function sendVesselEmailUpdate(subscription) {
     }
 
     const etaLine = liveVessel.eta
-        ? `ETA (Port of Discharge): ${new Date(liveVessel.eta).toUTCString()}`
-        : 'ETA (Port of Discharge): unavailable'
+        ? `ETA: ${new Date(liveVessel.eta).toUTCString()}`
+        : 'ETA: unavailable'
+
+    // Build voyage progress info
+    let progressLine = ''
+    if (liveVessel.distanceRemainingNm && liveVessel.hoursRemaining) {
+        const days = Math.floor(liveVessel.hoursRemaining / 24)
+        const hours = Math.round(liveVessel.hoursRemaining % 24)
+        const timeStr = days > 0 ? `${days}d ${hours}h` : `${hours}h`
+        progressLine = `Distance Remaining: ${liveVessel.distanceRemainingNm.toFixed(0)} nm (~${timeStr} at current speed)`
+    } else if (liveVessel.distanceRemainingNm) {
+        progressLine = `Distance Remaining: ${liveVessel.distanceRemainingNm.toFixed(0)} nm`
+    }
+
+    // Get route-based congestion forecast
+    let routeCongestion = null
+    if (liveVessel.originLat && liveVessel.originLng && liveVessel.destLat && liveVessel.destLng) {
+        routeCongestion = estimateRouteDelay(
+            liveVessel.originLat, liveVessel.originLng,
+            liveVessel.destLat, liveVessel.destLng
+        )
+    }
+
     const warnings = buildWarningLines(liveVessel, weather)
 
-    const subject = `Vessel Update: ${liveVessel.name || liveVessel.mmsi}`
+    // Build email subject with status indicator
+    let statusIndicator = ''
+    if (warnings.length > 0) {
+        statusIndicator = ' ⚠️'
+    } else if (liveVessel.speed > 0) {
+        statusIndicator = ' ✓'
+    }
+    const subject = `Vessel Update: ${liveVessel.name || liveVessel.mmsi}${statusIndicator}`
+
     const bodyLines = [
-        `Vessel: ${liveVessel.name || 'Unknown'} (${liveVessel.mmsi || 'N/A'})`,
+        `=== VESSEL STATUS UPDATE ===`,
+        ``,
+        `Vessel: ${liveVessel.name || 'Unknown'}`,
+        `MMSI: ${liveVessel.mmsi || 'N/A'}`,
+        ``,
+        `--- ROUTE ---`,
         `Port of Loading: ${liveVessel.origin || 'N/A'}`,
         `Port of Discharge: ${liveVessel.destination || 'N/A'}`,
+        ``,
+        `--- CURRENT STATUS ---`,
         formatPositionLine(liveVessel),
-        etaLine,
-        formatWeatherLine(weather)
+        `Speed: ${liveVessel.speed?.toFixed(1) || '0'} knots`,
+        `Heading: ${liveVessel.heading || liveVessel.cog || 'N/A'}°`,
+        etaLine
     ]
 
-    if (warnings.length) {
-        bodyLines.push('', 'Warnings:', ...warnings.map(w => `- ${w}`))
+    if (progressLine) {
+        bodyLines.push(progressLine)
     }
+
+    bodyLines.push(``, `--- WEATHER CONDITIONS ---`, formatWeatherLine(weather))
+
+    // Add route congestion forecast
+    if (routeCongestion && routeCongestion.affectedZones.length > 0) {
+        bodyLines.push(``, `--- ROUTE CONGESTION FORECAST ---`)
+        bodyLines.push(`Total Estimated Delay: ${routeCongestion.totalDelayMinutes} minutes`)
+        routeCongestion.affectedZones.forEach(zone => {
+            const warningStr = zone.warnings?.length ? ` (${zone.warnings.join(', ')})` : ''
+            bodyLines.push(`- ${zone.name}: ${zone.delay} min delay [${zone.severity}]${warningStr}`)
+        })
+    }
+
+    // Add current location warnings
+    if (warnings.length) {
+        bodyLines.push(``, `--- ACTIVE WARNINGS ---`)
+        warnings.forEach(w => bodyLines.push(`⚠ ${w}`))
+    }
+
+    bodyLines.push(``, `---`, `Report generated: ${new Date().toUTCString()}`)
 
     const text = bodyLines.join('\n')
 
@@ -311,22 +368,45 @@ async function sendVesselEmailUpdate(subscription) {
     }
 }
 
+const MAX_RETRY_COUNT = 3
+const RETRY_DELAY_MS = 5 * 60 * 1000 // 5 minutes between retries
+
 async function runNotificationsTick() {
     if (!subscriptions.length) return
     const now = Date.now()
+    let modified = false
 
     for (const sub of subscriptions) {
         if (!sub.active) continue
         if (!sub.nextRun || sub.nextRun > now) continue
+
         try {
             await sendVesselEmailUpdate(sub)
             sub.lastSentAt = new Date().toISOString()
             sub.nextRun = Date.now() + sub.cadenceHours * 60 * 60 * 1000
+            sub.retryCount = 0 // Reset retry count on success
+            sub.lastError = null
+            modified = true
+            console.log(`Scheduled notification sent for ${sub.mmsi} to ${sub.email}`)
         } catch (err) {
             sub.lastError = err.message
+            sub.retryCount = (sub.retryCount || 0) + 1
+            modified = true
+
+            if (sub.retryCount >= MAX_RETRY_COUNT) {
+                // Max retries reached - skip to next scheduled time
+                console.error(`Notification for ${sub.mmsi} failed after ${MAX_RETRY_COUNT} retries: ${err.message}`)
+                sub.nextRun = Date.now() + sub.cadenceHours * 60 * 60 * 1000
+                sub.retryCount = 0
+            } else {
+                // Retry after delay
+                console.error(`Notification for ${sub.mmsi} failed (retry ${sub.retryCount}/${MAX_RETRY_COUNT}): ${err.message}`)
+                sub.nextRun = Date.now() + RETRY_DELAY_MS
+            }
         }
     }
-    saveSubscriptions()
+
+    if (modified) saveSubscriptions()
 }
 
 function startNotificationsScheduler() {
@@ -1655,7 +1735,7 @@ app.post('/api/notifications', async (req, res) => {
     if (!EMAIL_ENABLED) {
         return res.status(400).json({ error: 'Email service not configured' })
     }
-    const { mmsi, email, cadenceHours } = req.body || {}
+    const { mmsi, email, cadenceHours, sendNow } = req.body || {}
     if (!mmsi || !email) {
         return res.status(400).json({ error: 'mmsi and email required' })
     }
@@ -1669,7 +1749,9 @@ app.post('/api/notifications', async (req, res) => {
         active: true,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        nextRun: Date.now() + cadence * 60 * 60 * 1000
+        // Send first email immediately (nextRun = now), then wait cadence for subsequent
+        nextRun: sendNow !== false ? Date.now() : Date.now() + cadence * 60 * 60 * 1000,
+        retryCount: 0
     }
     subscriptions.push(entry)
     saveSubscriptions()
