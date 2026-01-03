@@ -230,6 +230,18 @@ class VesselService {
         const data = await response.json()
         return data.subscription
     }
+
+    async sendNotificationNow(id) {
+        const response = await fetch(`/api/notifications/${encodeURIComponent(id)}/test`, {
+            method: 'POST'
+        })
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}))
+            throw new Error(err.error || 'Failed to send test email')
+        }
+        const data = await response.json()
+        return data.subscription
+    }
 }
 
 export const vesselService = new VesselService()

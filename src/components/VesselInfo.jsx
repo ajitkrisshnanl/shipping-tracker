@@ -26,6 +26,7 @@ function VesselInfo({ vessel, onClose }) {
     const [notificationError, setNotificationError] = useState(null)
     const [notificationSuccess, setNotificationSuccess] = useState(null)
     const [isSubmitting, setIsSubmitting] = useState(false)
+    const [sendingId, setSendingId] = useState(null)
 
     // Format ETA
     const formatETA = (date) => {
@@ -83,6 +84,20 @@ function VesselInfo({ vessel, onClose }) {
             setNotificationSuccess('Email updates stopped.')
         } catch (err) {
             setNotificationError(err.message)
+        }
+    }
+
+    const handleSendNow = async (id) => {
+        setNotificationError(null)
+        setNotificationSuccess(null)
+        setSendingId(id)
+        try {
+            await vesselService.sendNotificationNow(id)
+            setNotificationSuccess('Test email sent.')
+        } catch (err) {
+            setNotificationError(err.message)
+        } finally {
+            setSendingId(null)
         }
     }
 
@@ -275,6 +290,15 @@ function VesselInfo({ vessel, onClose }) {
                                 <div key={sub.id} className="info-row" style={{ alignItems: 'center' }}>
                                     <span className="info-label">{sub.email}</span>
                                     <span className="info-value">{sub.cadenceHours}h</span>
+                                    <button
+                                        type="button"
+                                        className="secondary-btn"
+                                        onClick={() => handleSendNow(sub.id)}
+                                        disabled={sendingId === sub.id}
+                                        style={{ marginLeft: 8 }}
+                                    >
+                                        {sendingId === sub.id ? 'Sending...' : 'Send Now'}
+                                    </button>
                                     <button
                                         type="button"
                                         className="secondary-btn"

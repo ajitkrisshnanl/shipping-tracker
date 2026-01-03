@@ -1590,6 +1590,25 @@ app.post('/api/notifications/:id/cancel', (req, res) => {
     res.json({ subscription: sub })
 })
 
+app.post('/api/notifications/:id/test', async (req, res) => {
+    if (!EMAIL_ENABLED) {
+        return res.status(400).json({ error: 'Email service not configured' })
+    }
+    const id = req.params.id?.toString()
+    const sub = subscriptions.find(s => s.id === id)
+    if (!sub) return res.status(404).json({ error: 'not found' })
+    try {
+        await sendVesselEmailUpdate(sub)
+        sub.lastSentAt = new Date().toISOString()
+        sub.nextRun = Date.now() + sub.cadenceHours * 60 * 60 * 1000
+        sub.updatedAt = new Date().toISOString()
+        saveSubscriptions()
+        res.json({ ok: true, subscription: sub })
+    } catch (err) {
+        res.status(500).json({ error: err.message })
+    }
+})
+
 app.get('/api/health', (req, res) => res.json({
     status: 'ok',
     timestamp: new Date(),
