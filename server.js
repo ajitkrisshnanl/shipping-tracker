@@ -63,17 +63,21 @@ const SCRAPE_HEADERS = {
     'Accept': 'text/html'
 }
 
+// Email configuration - Brevo HTTP API (preferred) or SMTP fallback
+const BREVO_API_KEY = process.env.BREVO_API_KEY || null
 const SMTP_HOST = process.env.SMTP_HOST || null
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587)
 const SMTP_USER = process.env.SMTP_USER || null
 const SMTP_PASS = process.env.SMTP_PASS || null
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || null
 const SMTP_SECURE = (process.env.SMTP_SECURE || '').toLowerCase() === 'true'
-const EMAIL_ENABLED = !!(SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM)
+const EMAIL_VIA_API = !!BREVO_API_KEY
+const EMAIL_VIA_SMTP = !!(SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM)
+const EMAIL_ENABLED = EMAIL_VIA_API || EMAIL_VIA_SMTP
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 15000)
 const SMTP_SEND_TIMEOUT_MS = Number(process.env.SMTP_SEND_TIMEOUT_MS || 15000)
 
-const mailTransporter = EMAIL_ENABLED
+const mailTransporter = EMAIL_VIA_SMTP
     ? nodemailer.createTransport({
         host: SMTP_HOST,
         port: SMTP_PORT,
@@ -84,6 +88,31 @@ const mailTransporter = EMAIL_ENABLED
         socketTimeout: 20000
     })
     : null
+
+// Send email via Brevo HTTP API
+async function sendEmailViaBrevoAPI(to, subject, textContent) {
+    const response = await fetchWithTimeout('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+            'accept': 'application/json',
+            'api-key': BREVO_API_KEY,
+            'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+            sender: { email: SMTP_FROM || 'noreply@vesseltracker.app', name: 'Vessel Tracker' },
+            to: [{ email: to }],
+            subject: subject,
+            textContent: textContent
+        })
+    })
+
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(`Brevo API error: ${response.status} - ${errorData.message || 'Unknown error'}`)
+    }
+
+    return await response.json()
+}
 
 function withTimeout(promise, timeoutMs, label) {
     let timeoutId = null
@@ -201,7 +230,7 @@ function buildWarningLines(vessel, weather) {
 }
 
 async function sendVesselEmailUpdate(subscription) {
-    if (!EMAIL_ENABLED || !mailTransporter) {
+    if (!EMAIL_ENABLED) {
         throw new Error('Email service not configured')
     }
 
@@ -255,16 +284,26 @@ async function sendVesselEmailUpdate(subscription) {
     const text = bodyLines.join('\n')
 
     try {
-        await withTimeout(
-            mailTransporter.sendMail({
-                from: SMTP_FROM,
-                to: subscription.email,
-                subject,
-                text
-            }),
-            SMTP_SEND_TIMEOUT_MS,
-            'SMTP send'
-        )
+        // Prefer Brevo HTTP API (works on all cloud platforms)
+        if (EMAIL_VIA_API) {
+            await sendEmailViaBrevoAPI(subscription.email, subject, text)
+            console.log('Email sent via Brevo API to:', subscription.email)
+        } else if (mailTransporter) {
+            // Fallback to SMTP
+            await withTimeout(
+                mailTransporter.sendMail({
+                    from: SMTP_FROM,
+                    to: subscription.email,
+                    subject,
+                    text
+                }),
+                SMTP_SEND_TIMEOUT_MS,
+                'SMTP send'
+            )
+            console.log('Email sent via SMTP to:', subscription.email)
+        } else {
+            throw new Error('No email transport configured')
+        }
     } catch (err) {
         const formatted = formatEmailError(err)
         console.error('Email send failed:', formatted)
@@ -1702,8 +1741,8 @@ server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`)
     console.log(`Gemini API Key configured: ${!!process.env.GEMINI_API_KEY}`)
     console.log(`Position refresh interval: ${POSITION_REFRESH_MS}ms`)
-    console.log(`Email notifications enabled: ${EMAIL_ENABLED}`)
-    if (EMAIL_ENABLED && mailTransporter) {
+    console.log(`Email notifications enabled: ${EMAIL_ENABLED} (via ${EMAIL_VIA_API ? 'Brevo API' : EMAIL_VIA_SMTP ? 'SMTP' : 'none'})`)
+    if (EMAIL_VIA_SMTP && mailTransporter) {
         withTimeout(mailTransporter.verify(), SMTP_SEND_TIMEOUT_MS, 'SMTP verify')
             .then(() => console.log('SMTP connection verified'))
             .catch((err) => console.error('SMTP verify failed:', formatEmailError(err)))
