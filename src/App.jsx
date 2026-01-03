@@ -244,12 +244,12 @@ function VesselCard({ vessel, isActive, onClick }) {
 
             <div className="vessel-route">
                 <div className="route-port">
-                    <div className="route-port-label">Origin</div>
+                    <div className="route-port-label">Port of Loading</div>
                     <div className="route-port-name">{vessel.origin || 'N/A'}</div>
                 </div>
                 <span className="route-arrow">→</span>
                 <div className="route-port">
-                    <div className="route-port-label">Destination</div>
+                    <div className="route-port-label">Port of Discharge</div>
                     <div className="route-port-name">{vessel.destination || 'N/A'}</div>
                 </div>
             </div>

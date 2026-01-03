@@ -388,8 +388,9 @@ Return ONLY a valid JSON object with these fields (use null for missing values):
 {
   "vessel": "vessel/ship name",
   "voyage": "voyage number",
-  "origin": "port of loading / place of receipt",
-  "destination": "port of discharge / place of delivery / final destination",
+  "portOfLoading": "port of loading (POL)",
+  "portOfDischarge": "port of discharge (POD)",
+  "finalDestination": "final place of delivery (if different from POD)",
   "eta": "estimated arrival date or shipped on board date",
   "blNumber": "bill of lading number",
   "shipper": "shipper/exporter name",
@@ -398,6 +399,7 @@ Return ONLY a valid JSON object with these fields (use null for missing values):
 }
 
 Important rules:
+- Prefer the exact POL and POD fields from the BL (not the final inland destination)
 - Extract the actual port/city names, not labels
 - Vessel name should be just the ship name without voyage number
 - Return ONLY valid JSON, no markdown code blocks, no explanation`
@@ -572,7 +574,15 @@ async function extractVesselDetailsFromPDFImage(pdfBuffer, extractedText = '') {
 
 async function extractVesselDetailsWithAI(text) {
     if (!text || text.trim().length < 50) {
-        return { vessel: null, voyage: null, origin: null, destination: null, eta: null, blNumber: null }
+        return {
+            vessel: null,
+            voyage: null,
+            portOfLoading: null,
+            portOfDischarge: null,
+            finalDestination: null,
+            eta: null,
+            blNumber: null
+        }
     }
 
     // Try Gemini first
@@ -603,7 +613,15 @@ async function extractVesselDetailsWithAI(text) {
         return gptResult
     }
 
-    return { vessel: null, voyage: null, origin: null, destination: null, eta: null, blNumber: null }
+    return {
+        vessel: null,
+        voyage: null,
+        portOfLoading: null,
+        portOfDischarge: null,
+        finalDestination: null,
+        eta: null,
+        blNumber: null
+    }
 }
 
 // Port geocoding via Nominatim OpenStreetMap
@@ -1014,6 +1032,9 @@ async function createVesselFromImport(details, rawText = '') {
     if (!details.vessel) return null
 
     const vesselName = (details.vessel || '').toUpperCase().trim()
+    const portOfLoading = details.portOfLoading || details.origin || null
+    const portOfDischarge = details.portOfDischarge || details.destination || null
+    const finalDestination = details.finalDestination || null
 
     // Try to extract MMSI from document or AI extraction
     let mmsi = details.mmsi || extractMmsiFromText(rawText)
@@ -1037,11 +1058,11 @@ async function createVesselFromImport(details, rawText = '') {
 
     // Get coordinates for origin and destination ports + vessel status from VesselFinder
     const [originCoords, destCoords, vesselStatus] = await Promise.all([
-        geocodePort(details.origin),
-        geocodePort(details.destination),
+        geocodePort(portOfLoading),
+        geocodePort(portOfDischarge),
         getVesselStatus(mmsi)
     ])
-    console.log('Geocode results:', { origin: details.origin, originCoords, destination: details.destination, destCoords })
+    console.log('Geocode results:', { origin: portOfLoading, originCoords, destination: portOfDischarge, destCoords })
     console.log('Vessel status from VesselFinder:', vesselStatus)
 
     // Check if we have cached position from previous scraper refresh
@@ -1053,14 +1074,15 @@ async function createVesselFromImport(details, rawText = '') {
         imo: vesselStatus?.imo || vesselInfo?.imo || null,
         flag: vesselStatus?.country || vesselInfo?.flag || null,
         shipType: vesselStatus?.vesselType || vesselInfo?.type || null,
-        destination: details.destination || null,
+        destination: portOfDischarge || null,
         currentDestination: vesselStatus?.currentDestination || null, // Current reported destination
-        origin: details.origin || null,
+        origin: portOfLoading || null,
         voyage: details.voyage || null,
         voyageNo: details.voyage || null,
         blNumber: details.blNumber || null,
         shipper: details.shipper || null,
         consignee: details.consignee || null,
+        finalDestination: finalDestination,
         originLat: originCoords?.lat ?? null,
         originLng: originCoords?.lon ?? null,
         destLat: destCoords?.lat ?? null,

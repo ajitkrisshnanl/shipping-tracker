@@ -138,6 +138,7 @@ class VesselService {
             heading: raw.heading || raw.TrueHeading,
             cog: raw.cog || raw.Cog,
             destination: raw.destination || raw.Destination,
+            finalDestination: raw.finalDestination || raw.final_destination || null,
             origin: raw.origin || raw.Origin,
             originLat: raw.originLat,
             originLng: raw.originLng,

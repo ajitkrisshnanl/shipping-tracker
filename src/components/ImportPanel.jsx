@@ -127,13 +127,19 @@ function ImportPanel({ onClose, onImportComplete }) {
                                             <span className="value">{extractedData.vessel.voyageNo || extractedData.vessel.voyage || '-'}</span>
                                         </div>
                                         <div className="data-row">
-                                            <span className="label">Origin</span>
+                                            <span className="label">Port of Loading</span>
                                             <span className="value">{extractedData.vessel.origin}</span>
                                         </div>
                                         <div className="data-row">
-                                            <span className="label">Destination</span>
+                                            <span className="label">Port of Discharge</span>
                                             <span className="value">{extractedData.vessel.destination}</span>
                                         </div>
+                                        {extractedData.vessel.finalDestination && (
+                                            <div className="data-row">
+                                                <span className="label">Final Destination</span>
+                                                <span className="value">{extractedData.vessel.finalDestination}</span>
+                                            </div>
+                                        )}
                                         <div className="data-row">
                                             <span className="label">MMSI (Est.)</span>
                                             <span className="value mono">{extractedData.vessel.mmsi}</span>

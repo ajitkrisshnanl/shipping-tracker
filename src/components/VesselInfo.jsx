@@ -89,13 +89,19 @@ function VesselInfo({ vessel, onClose }) {
                 <div className="info-section">
                     <div className="info-section-title">Route</div>
                     <div className="info-row">
-                        <span className="info-label">Origin</span>
+                        <span className="info-label">Port of Loading</span>
                         <span className="info-value">{vessel.origin || 'N/A'}</span>
                     </div>
                     <div className="info-row">
-                        <span className="info-label">Destination</span>
+                        <span className="info-label">Port of Discharge</span>
                         <span className="info-value">{vessel.destination || 'N/A'}</span>
                     </div>
+                    {vessel.finalDestination && (
+                        <div className="info-row">
+                            <span className="info-label">Final Destination</span>
+                            <span className="info-value">{vessel.finalDestination}</span>
+                        </div>
+                    )}
                 </div>
 
                 {/* ETA Highlight */}
