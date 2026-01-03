@@ -349,28 +349,111 @@ ${truncatedText}`
 // Port geocoding via Nominatim OpenStreetMap
 const geocodeCache = new Map()
 
+// Generate simplified search terms from a port name
+function simplifyPortName(portName) {
+    const variants = []
+    const clean = portName.trim()
+
+    // Original
+    variants.push(clean)
+
+    // Remove common suffixes
+    const noSuffix = clean
+        .replace(/,?\s*(UNITED STATES|USA|US|UK|CHINA|INDIA|UAE)$/i, '')
+        .replace(/,?\s*(PORT|TERMINAL|HARBOR|HARBOUR|SEAPORT)$/i, '')
+        .trim()
+    if (noSuffix !== clean) variants.push(noSuffix)
+
+    // Extract parts after comma (often the country/region)
+    const parts = clean.split(',').map(p => p.trim())
+    if (parts.length > 1) {
+        // Try "city, country" format
+        variants.push(`${parts[0]}, ${parts[parts.length - 1]}`)
+        // Try just the first part (port/city name)
+        variants.push(parts[0])
+        // Try just the country
+        variants.push(parts[parts.length - 1])
+    }
+
+    // Remove "PORT" prefix
+    const noPrefix = clean.replace(/^(PORT\s+OF\s+|PORT\s+)/i, '').trim()
+    if (noPrefix !== clean) variants.push(noPrefix)
+
+    // For compound names, try first word + country
+    const words = parts[0].split(/\s+/)
+    if (words.length > 1 && parts.length > 1) {
+        variants.push(`${words[0]} ${parts[parts.length - 1]}`)
+    }
+
+    return [...new Set(variants)] // Remove duplicates
+}
+
 async function geocodePort(portName) {
     if (!portName) return null
     const cacheKey = portName.trim().toLowerCase()
     if (geocodeCache.has(cacheKey)) return geocodeCache.get(cacheKey)
 
-    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(portName)}`
-    try {
-        const res = await fetch(url, {
-            headers: { 'User-Agent': 'shipping-tracker/1.0' }
-        })
-        if (!res.ok) throw new Error(`geocode error ${res.status}`)
-        const data = await res.json()
-        const first = data && data[0]
-        if (first) {
-            const coords = { lat: Number(first.lat), lon: Number(first.lon) }
-            geocodeCache.set(cacheKey, coords)
-            return coords
+    const variants = simplifyPortName(portName)
+    console.log('Geocoding port:', portName, '- trying variants:', variants.slice(0, 3).join(', '))
+
+    // Try Photon (Komoot's OSM-based geocoder) first - more permissive
+    for (const searchTerm of variants.slice(0, 3)) {
+        try {
+            const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(searchTerm)}&limit=1`
+            const res = await fetch(photonUrl, {
+                headers: { 'Accept': 'application/json' }
+            })
+
+            if (res.ok) {
+                const data = await res.json()
+                if (data.features && data.features[0]) {
+                    const [lon, lat] = data.features[0].geometry.coordinates
+                    const coords = { lat: Number(lat), lon: Number(lon) }
+                    console.log('Geocoded (Photon)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
+                    geocodeCache.set(cacheKey, coords)
+                    return coords
+                }
+            }
+        } catch (err) {
+            console.log('Photon geocode error:', err.message)
         }
-    } catch (err) {
-        console.error('Geocode failed', portName, err.message)
     }
 
+    // Fallback to Nominatim with proper headers
+    for (const searchTerm of variants) {
+        const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(searchTerm)}`
+        try {
+            await new Promise(r => setTimeout(r, 1100)) // Rate limit
+
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'ShippingTracker/1.0 (https://github.com/shipping-tracker)',
+                    'Accept': 'application/json',
+                    'Accept-Language': 'en'
+                }
+            })
+
+            if (res.status === 403 || res.status === 503 || res.status === 429) {
+                console.log('Nominatim blocked/rate-limited, trying next variant')
+                continue
+            }
+
+            if (!res.ok) continue
+
+            const data = await res.json()
+            const first = data && data[0]
+            if (first) {
+                const coords = { lat: Number(first.lat), lon: Number(first.lon) }
+                console.log('Geocoded (Nominatim)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
+                geocodeCache.set(cacheKey, coords)
+                return coords
+            }
+        } catch (err) {
+            console.error('Nominatim error for', searchTerm, ':', err.message)
+        }
+    }
+
+    console.error('All geocode attempts failed for:', portName)
     geocodeCache.set(cacheKey, null)
     return null
 }
