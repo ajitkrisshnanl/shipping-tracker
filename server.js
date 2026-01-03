@@ -40,7 +40,6 @@ const trackedVessels = new Map()
 
 // AIS Stream API Key (Airstream WebSocket)
 const AIS_API_KEY = process.env.AIS_API_KEY || process.env.AIRSTREAM_API || null
-const DISABLE_AIS_STREAM = process.env.DISABLE_AIS_STREAM === 'true'
 
 // AIS Stream Connection
 let aisSocket = null
@@ -68,8 +67,8 @@ function getBoundingBoxesForSubscription() {
     return boxes.length ? boxes : [[[-90, -180], [90, 180]]]
 }
 function ensureAISConnection() {
-    if (!AIS_API_KEY || DISABLE_AIS_STREAM) {
-        if (!AIS_API_KEY) console.log('No AIS_API_KEY/AIRSTREAM_API configured')
+    if (!AIS_API_KEY) {
+        console.log('No AIS_API_KEY/AIRSTREAM_API configured - AIS tracking disabled')
         return
     }
     if (aisSocket && (aisSocket.readyState === WebSocket.OPEN || aisSocket.readyState === WebSocket.CONNECTING)) return
@@ -151,6 +150,7 @@ async function handleAisMessage(message) {
     if (latitude !== undefined && longitude !== undefined) {
         updated.latitude = Number(latitude)
         updated.longitude = Number(longitude)
+        updated.positionSource = 'ais-stream'
     }
 
     if (body.Sog !== undefined) updated.speed = Number(body.Sog)
