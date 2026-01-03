@@ -1,8 +1,9 @@
 /**
- * Vessel Service - Handles API communication and WebSocket connections
+ * Vessel Service - Handles API communication via HTTP polling
  */
 
 const DEFAULT_API_TIMEOUT_MS = 20000
+const POLLING_INTERVAL_MS = 30000 // 30 seconds
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
     const controller = new AbortController()
@@ -21,10 +22,9 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_API_TIMEO
 
 class VesselService {
     constructor() {
-        this.ws = null
         this.listeners = new Map()
-        this.reconnectTimeout = null
-        this.isConnecting = false
+        this.pollingInterval = null
+        this.isConnected = false
     }
 
     // Event emitter methods
@@ -47,67 +47,18 @@ class VesselService {
         this.listeners.get(event).forEach(cb => cb(data))
     }
 
-    // Connect to WebSocket with HTTP polling fallback
+    // Start HTTP polling for vessel updates
     connect() {
-        if (this.isConnecting) return
-
-        this.isConnecting = true
-        const isVercel = window.location.hostname.includes('vercel.app')
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const wsUrl = `${protocol}//${window.location.host}/ws`
-
-        // Start HTTP Polling as a reliable backup/primary for Vercel
-        this.startPolling()
-
-        // Only try WebSocket if not on Vercel (or try anyway but don't rely on it)
-        try {
-            this.ws = new WebSocket(wsUrl)
-
-            this.ws.onopen = () => {
-                console.log('WebSocket connected')
-                this.isConnecting = false
-                this.emit('connect')
-                // Stop polling if WS is successful (optional, but keep it for robust Vercel support)
-            }
-
-            this.ws.onclose = () => {
-                console.log('WebSocket disconnected')
-                this.isConnecting = false
-                this.emit('disconnect')
-                // Reconnect WS after delay
-                this.reconnectTimeout = setTimeout(() => this.connect(), 5000)
-            }
-
-            this.ws.onerror = (error) => {
-                console.error('WebSocket error:', error)
-                this.isConnecting = false
-            }
-
-            this.ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data)
-                    this.handleMessage(data)
-                } catch (e) {
-                    console.error('Failed to parse message:', e)
-                }
-            }
-        } catch (error) {
-            console.error('Failed to connect WebSocket:', error)
-            this.isConnecting = false
-        }
-    }
-
-    startPolling() {
         if (this.pollingInterval) return
 
-        console.log('Starting HTTP polling fallback...')
-        this.poll()
-        this.pollingInterval = setInterval(() => this.poll(), 30000) // 30s to match Render idle behavior
+        console.log('Starting vessel data polling...')
+        this.poll() // Initial fetch
+        this.pollingInterval = setInterval(() => this.poll(), POLLING_INTERVAL_MS)
     }
 
     async poll() {
         try {
-            const response = await fetch('/api/vessels')
+            const response = await fetchWithTimeout('/api/vessels')
             if (!response.ok) throw new Error('Polling failed')
             const data = await response.json()
 
@@ -115,31 +66,28 @@ class VesselService {
                 data.vessels.forEach(v => {
                     this.emit('vesselUpdate', this.transformVesselData(v))
                 })
-                // If polling works, we are "connected" in a sense
-                this.emit('connect')
+
+                // Mark as connected on successful poll
+                if (!this.isConnected) {
+                    this.isConnected = true
+                    this.emit('connect')
+                }
             }
         } catch (error) {
             console.error('Polling error:', error)
+            if (this.isConnected) {
+                this.isConnected = false
+                this.emit('disconnect')
+            }
         }
     }
 
     disconnect() {
-        if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout)
-        if (this.pollingInterval) clearInterval(this.pollingInterval)
-        if (this.ws) {
-            this.ws.close()
-            this.ws = null
+        if (this.pollingInterval) {
+            clearInterval(this.pollingInterval)
+            this.pollingInterval = null
         }
-    }
-
-    handleMessage(data) {
-        if (data.type === 'position') {
-            this.emit('vesselUpdate', this.transformVesselData(data.vessel))
-        } else if (data.type === 'vessels') {
-            data.vessels.forEach(v => {
-                this.emit('vesselUpdate', this.transformVesselData(v))
-            })
-        }
+        this.isConnected = false
     }
 
     transformVesselData(raw) {
@@ -172,20 +120,16 @@ class VesselService {
         }
     }
 
-    // Subscribe to vessel updates
+    // Subscribe to vessel updates (triggers immediate refresh)
     subscribeToVessel(mmsi) {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({
-                type: 'subscribe',
-                mmsi: mmsi
-            }))
-        }
+        // With HTTP polling, just trigger an immediate poll
+        this.poll()
     }
 
     // Search vessels by name, MMSI, or IMO
     async searchVessels(query) {
         try {
-            const response = await fetch(`/api/vessels/search?q=${encodeURIComponent(query)}`)
+            const response = await fetchWithTimeout(`/api/vessels/search?q=${encodeURIComponent(query)}`)
             if (!response.ok) throw new Error('Search failed')
             const data = await response.json()
             return data.vessels || []
@@ -198,7 +142,7 @@ class VesselService {
     // Get known bottleneck zones
     async getBottlenecks() {
         try {
-            const response = await fetch('/api/bottlenecks')
+            const response = await fetchWithTimeout('/api/bottlenecks')
             if (!response.ok) throw new Error('Failed to fetch bottlenecks')
             const data = await response.json()
             return data.bottlenecks || []
@@ -209,21 +153,21 @@ class VesselService {
     }
 
     async getVesselDetails(mmsi) {
-        const response = await fetch(`/api/vessels/${encodeURIComponent(mmsi)}/details`)
+        const response = await fetchWithTimeout(`/api/vessels/${encodeURIComponent(mmsi)}/details`)
         if (!response.ok) throw new Error('Failed to fetch vessel details')
         const data = await response.json()
         return this.transformVesselData(data.vessel || {})
     }
 
     async getNotifications(mmsi) {
-        const response = await fetch(`/api/notifications?mmsi=${encodeURIComponent(mmsi)}`)
+        const response = await fetchWithTimeout(`/api/notifications?mmsi=${encodeURIComponent(mmsi)}`)
         if (!response.ok) throw new Error('Failed to fetch notifications')
         const data = await response.json()
         return data.subscriptions || []
     }
 
     async createNotification({ mmsi, email, cadenceHours }) {
-        const response = await fetch('/api/notifications', {
+        const response = await fetchWithTimeout('/api/notifications', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ mmsi, email, cadenceHours })
@@ -237,7 +181,7 @@ class VesselService {
     }
 
     async cancelNotification(id) {
-        const response = await fetch(`/api/notifications/${encodeURIComponent(id)}/cancel`, {
+        const response = await fetchWithTimeout(`/api/notifications/${encodeURIComponent(id)}/cancel`, {
             method: 'POST'
         })
         if (!response.ok) {

@@ -154,14 +154,21 @@ function createCongestionSegments(route, bottlenecks) {
     return segments
 }
 
-// Create custom vessel icon
-const createVesselIcon = (isSelected = false) => {
-    return L.divIcon({
-        className: `vessel-marker ${isSelected ? 'selected' : ''}`,
-        iconSize: isSelected ? [20, 20] : [16, 16],
-        iconAnchor: isSelected ? [10, 10] : [8, 8],
-    })
-}
+// Pre-create vessel icons (memoized for performance)
+const vesselIconNormal = L.divIcon({
+    className: 'vessel-marker',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+})
+
+const vesselIconSelected = L.divIcon({
+    className: 'vessel-marker selected',
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+})
+
+// Get cached icon based on selection state
+const getVesselIcon = (isSelected) => isSelected ? vesselIconSelected : vesselIconNormal
 
 function normalizeRoute(route = []) {
     if (!Array.isArray(route)) return []
@@ -418,7 +425,7 @@ function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
                         <Marker
                             key={vessel.mmsi}
                             position={[vessel.latitude, vessel.longitude]}
-                            icon={createVesselIcon(isSelected)}
+                            icon={getVesselIcon(isSelected)}
                             eventHandlers={{
                                 click: () => onVesselSelect(vessel)
                             }}

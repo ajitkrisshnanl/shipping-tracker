@@ -1,14 +1,12 @@
 /**
- * Backend Server - Express + WebSocket for vessel tracking
+ * Backend Server - Express API for vessel tracking
  *
  * Uses AI-powered extraction (Google Gemini 3 Flash with GPT-4o fallback) to parse any Bill of Lading format.
- * Uses live web scraping for vessel tracking (no AIS WebSocket dependency).
+ * Uses live web scraping for vessel tracking.
  */
 
 const express = require('express')
 const cors = require('cors')
-const { WebSocketServer } = require('ws')
-const http = require('http')
 const path = require('path')
 const multer = require('multer')
 const pdfParse = require('pdf-parse')
@@ -1802,30 +1800,12 @@ if (process.env.NODE_ENV === 'production') {
     console.log('Production mode: serving from dist/')
     app.use(express.static(path.join(__dirname, 'dist')))
     app.get(/.*/, (req, res, next) => {
-        if (req.path.startsWith('/api') || req.path.startsWith('/ws')) return next()
+        if (req.path.startsWith('/api')) return next()
         res.sendFile(path.join(__dirname, 'dist', 'index.html'))
     })
 }
 
-const server = http.createServer(app)
-const wss = new WebSocketServer({ server })
-
-wss.on('connection', (ws) => {
-    console.log('Client connected to WebSocket')
-    const interval = setInterval(() => {
-        const combined = [...vesselDatabase, ...Array.from(trackedVessels.values())]
-        const unique = Array.from(new Map(combined.map(v => [v.mmsi, v])).values())
-        const sorted = unique.sort((a, b) => {
-            const ta = new Date(a.updatedAt || a.importedAt || 0).getTime()
-            const tb = new Date(b.updatedAt || b.importedAt || 0).getTime()
-            return tb - ta
-        })
-        ws.send(JSON.stringify({ type: 'vessels', data: sorted.slice(0, MAX_TRACKED_VESSELS) }))
-    }, POSITION_REFRESH_MS)
-    ws.on('close', () => clearInterval(interval))
-})
-
-server.listen(PORT, () => {
+app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`)
     console.log(`Gemini API Key configured: ${!!process.env.GEMINI_API_KEY}`)
     console.log(`Position refresh interval: ${POSITION_REFRESH_MS}ms`)

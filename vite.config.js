@@ -9,11 +9,31 @@ export default defineConfig({
             '/api': {
                 target: 'http://localhost:3001',
                 changeOrigin: true,
-            },
-            '/ws': {
-                target: 'ws://localhost:3001',
-                ws: true,
             }
         }
+    },
+    build: {
+        // Code splitting for better caching
+        rollupOptions: {
+            output: {
+                manualChunks: {
+                    // Vendor chunk for React
+                    'react-vendor': ['react', 'react-dom'],
+                    // Map libraries in separate chunk
+                    'map-vendor': ['leaflet', 'react-leaflet']
+                }
+            }
+        },
+        // Optimize chunk size
+        chunkSizeWarningLimit: 500,
+        // Enable minification with esbuild (faster, built-in)
+        minify: 'esbuild',
+        esbuild: {
+            drop: ['console', 'debugger']
+        },
+        // Generate source maps for debugging (optional in production)
+        sourcemap: false,
+        // Target modern browsers for smaller bundles
+        target: 'es2020'
     }
 })

@@ -5,6 +5,48 @@
 
 const searoute = require('searoute-js')
 
+// Vessel type average speeds in knots (for ETA estimation when live speed unavailable)
+const VESSEL_TYPE_SPEEDS = {
+    'container': 18,      // Container ships
+    'cargo': 14,          // General cargo
+    'bulk': 13,           // Bulk carriers
+    'tanker': 13,         // Oil tankers
+    'lng': 17,            // LNG carriers
+    'ro-ro': 16,          // Roll-on/roll-off
+    'passenger': 20,      // Cruise/passenger
+    'fishing': 10,        // Fishing vessels
+    'tug': 12,            // Tugs
+    'default': 12         // Fallback
+}
+
+// Get estimated speed based on vessel type
+function getVesselTypeSpeed(vesselType) {
+    if (!vesselType) return VESSEL_TYPE_SPEEDS.default
+    const type = vesselType.toLowerCase()
+    for (const [key, speed] of Object.entries(VESSEL_TYPE_SPEEDS)) {
+        if (type.includes(key)) return speed
+    }
+    return VESSEL_TYPE_SPEEDS.default
+}
+
+// Adjust speed based on weather conditions
+function adjustSpeedForWeather(baseSpeed, weather) {
+    if (!weather) return baseSpeed
+    let factor = 1.0
+
+    // Wind impact (reduces speed in strong headwinds)
+    if (weather.wind_speed_10m && weather.wind_speed_10m >= 15) {
+        factor -= 0.05 * Math.min((weather.wind_speed_10m - 15) / 10, 0.3)
+    }
+
+    // Wave height impact
+    if (weather.wave_height && weather.wave_height >= 2) {
+        factor -= 0.03 * Math.min((weather.wave_height - 2) / 2, 0.2)
+    }
+
+    return Math.max(baseSpeed * factor, baseSpeed * 0.5) // Never below 50%
+}
+
 function haversineDistance(lat1, lng1, lat2, lng2) {
     const R = 6371 // Earth radius in km
     const dLat = (lat2 - lat1) * Math.PI / 180
@@ -122,15 +164,31 @@ function calculateRouteDistance(route) {
     return totalKm * 0.539957 // Convert km to nautical miles
 }
 
-function estimateArrival(route, currentLat, currentLng, speedKnots) {
+function estimateArrival(route, currentLat, currentLng, speedKnots, options = {}) {
     const { remaining } = splitRouteByPosition(route, currentLat, currentLng)
     const remainingDistance = calculateRouteDistance(remaining)
-    const hoursRemaining = remainingDistance / (speedKnots || 12)
+
+    // Use provided speed, or estimate from vessel type, or default
+    let effectiveSpeed = speedKnots
+    if (!effectiveSpeed || effectiveSpeed <= 0) {
+        effectiveSpeed = options.vesselType
+            ? getVesselTypeSpeed(options.vesselType)
+            : VESSEL_TYPE_SPEEDS.default
+    }
+
+    // Adjust for weather if available
+    if (options.weather) {
+        effectiveSpeed = adjustSpeedForWeather(effectiveSpeed, options.weather)
+    }
+
+    const hoursRemaining = remainingDistance / effectiveSpeed
     const eta = new Date(Date.now() + hoursRemaining * 60 * 60 * 1000)
+
     return {
         eta: eta.toISOString(),
         distanceRemaining: Math.round(remainingDistance),
-        hoursRemaining: Math.round(hoursRemaining)
+        hoursRemaining: Math.round(hoursRemaining),
+        effectiveSpeed: Math.round(effectiveSpeed * 10) / 10
     }
 }
 
@@ -139,5 +197,8 @@ module.exports = {
     splitRouteByPosition,
     calculateRouteDistance,
     estimateArrival,
-    haversineDistance
+    haversineDistance,
+    getVesselTypeSpeed,
+    adjustSpeedForWeather,
+    VESSEL_TYPE_SPEEDS
 }

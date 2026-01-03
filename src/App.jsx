@@ -1,10 +1,12 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react'
 import Map from './components/Map'
 import SearchPanel from './components/SearchPanel'
 import VesselInfo from './components/VesselInfo'
 import BottleneckAlerts from './components/BottleneckAlerts'
-import ImportPanel from './components/ImportPanel'
 import { vesselService } from './services/vesselService'
+
+// Lazy load ImportPanel (only loaded when user clicks Import button)
+const ImportPanel = lazy(() => import('./components/ImportPanel'))
 
 // Ship icon SVG
 const ShipIcon = () => (
@@ -208,12 +210,20 @@ function App() {
                     />
                 )}
 
-                {/* Import Modal */}
+                {/* Import Modal (lazy loaded) */}
                 {showImport && (
-                    <ImportPanel
-                        onClose={() => setShowImport(false)}
-                        onImportComplete={handleImportComplete}
-                    />
+                    <Suspense fallback={
+                        <div className="modal-overlay">
+                            <div className="import-panel" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '200px' }}>
+                                <div className="loading-spinner"></div>
+                            </div>
+                        </div>
+                    }>
+                        <ImportPanel
+                            onClose={() => setShowImport(false)}
+                            onImportComplete={handleImportComplete}
+                        />
+                    </Suspense>
                 )}
             </main>
         </div>
