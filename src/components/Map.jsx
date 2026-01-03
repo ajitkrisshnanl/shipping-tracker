@@ -54,86 +54,18 @@ function getGradientColor(severityNum) {
     return '#e60000' // red - high congestion
 }
 
-// Sea route waypoints for realistic maritime routes
-const waypoints = {
-    kolkata: { lat: 22.5726, lng: 88.3639 },
-    singapore: { lat: 1.2897, lng: 103.8501 },
-    bahrain: { lat: 26.0667, lng: 50.5577 },
-    mumbai: { lat: 19.0760, lng: 72.8777 },
-    malaccaStrait: { lat: 4.2105, lng: 100.2808 },
-    babElMandeb: { lat: 12.5833, lng: 43.3333 },
-    suezNorth: { lat: 31.2653, lng: 32.3019 },
-    suezSouth: { lat: 29.9511, lng: 32.5503 },
-    gibraltar: { lat: 35.9667, lng: -5.5000 },
-    capeOfGoodHope: { lat: -34.3568, lng: 18.4740 },
-    panamaAtlantic: { lat: 9.3817, lng: -79.9181 },
-    panamaPacific: { lat: 8.9500, lng: -79.5667 },
-    newyork: { lat: 40.6892, lng: -74.0445 },
-    norfolk: { lat: 36.8508, lng: -76.2859 },
-    losangeles: { lat: 33.7395, lng: -118.2611 },
-    rotterdam: { lat: 51.9225, lng: 4.4792 },
-    hormuz: { lat: 26.0, lng: 56.2 }
-}
+function selectRouteMarkers(route) {
+    if (!route || route.length < 2) return []
+    const primary = route.filter((point) => point.type !== 'waypoint')
+    if (primary.length > 2) return primary
 
-// Calculate full shipping route
-function calculateShippingRoute(origin, destination, originName, destName) {
-    if (!origin || !destination) return []
-
-    const route = []
-    const originLat = origin.lat || origin[0]
-    const originLng = origin.lng || origin[1]
-    const destLat = destination.lat || destination[0]
-    const destLng = destination.lng || destination[1]
-
-    // Start
-    route.push({ lat: originLat, lng: originLng, name: originName || 'Origin', type: 'origin' })
-
-    // Determine route based on origin/destination regions
-    const originInIndia = originLat > 8 && originLat < 35 && originLng > 68 && originLng < 92
-    const originInGulf = originLat > 15 && originLat < 32 && originLng > 45 && originLng < 60
-    const originInAsia = originLng > 60 && originLng < 145
-    const destInUSEast = destLng > -85 && destLng < -65 && destLat > 25 && destLat < 45
-    const destInAmericasEast = destLng < -30 && destLng > -100
-    const destInEurope = destLat > 35 && destLng > -15 && destLng < 35
-
-    // India to US East Coast (Kolkata to Norfolk)
-    if (originInIndia && (destInUSEast || destInAmericasEast)) {
-        route.push({ ...waypoints.babElMandeb, name: 'Bab el-Mandeb', type: 'passage' })
-        route.push({ ...waypoints.suezSouth, name: 'Suez (South)', type: 'passage' })
-        route.push({ ...waypoints.suezNorth, name: 'Suez (North)', type: 'passage' })
-        route.push({ ...waypoints.gibraltar, name: 'Gibraltar', type: 'passage' })
-        route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
-    }
-    // Gulf (Bahrain) to US East/New York
-    else if (originInGulf && (destInUSEast || destInAmericasEast)) {
-        route.push({ ...waypoints.hormuz, name: 'Strait of Hormuz', type: 'passage' })
-        route.push({ ...waypoints.babElMandeb, name: 'Bab el-Mandeb', type: 'passage' })
-        route.push({ ...waypoints.suezSouth, name: 'Suez (South)', type: 'passage' })
-        route.push({ ...waypoints.suezNorth, name: 'Suez (North)', type: 'passage' })
-        route.push({ ...waypoints.gibraltar, name: 'Gibraltar', type: 'passage' })
-        route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
-    }
-    // Asia to US East via Suez
-    else if (originInAsia && (destInUSEast || destInAmericasEast)) {
-        route.push({ ...waypoints.singapore, name: 'Singapore', type: 'port' })
-        route.push({ ...waypoints.malaccaStrait, name: 'Malacca Strait', type: 'passage' })
-        route.push({ ...waypoints.babElMandeb, name: 'Bab el-Mandeb', type: 'passage' })
-        route.push({ ...waypoints.suezSouth, name: 'Suez (South)', type: 'passage' })
-        route.push({ ...waypoints.suezNorth, name: 'Suez (North)', type: 'passage' })
-        route.push({ ...waypoints.gibraltar, name: 'Gibraltar', type: 'passage' })
-        route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
-    }
-    // Default: direct with midpoint
-    else {
-        const midLat = (originLat + destLat) / 2
-        const midLng = (originLng + destLng) / 2
-        route.push({ lat: midLat, lng: midLng, name: 'En Route', type: 'waypoint' })
-    }
-
-    // End
-    route.push({ lat: destLat, lng: destLng, name: destName || 'Destination', type: 'destination' })
-
-    return route
+    const maxMarkers = 6
+    const step = Math.max(1, Math.floor(route.length / (maxMarkers - 1)))
+    const sampled = route.filter((_, idx) => idx % step === 0 || idx === route.length - 1)
+    return sampled.map((point, idx) => ({
+        ...point,
+        type: idx === 0 ? 'origin' : idx === sampled.length - 1 ? 'destination' : 'waypoint'
+    }))
 }
 
 // Haversine distance
@@ -346,13 +278,14 @@ function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
         const hasCurrent = selectedVessel.latitude && selectedVessel.longitude
 
         const routeFromApi = normalizeRoute(selectedVessel.route)
-        const origin = hasOrigin ? { lat: selectedVessel.originLat, lng: selectedVessel.originLng } : null
-        const dest = hasDest ? { lat: selectedVessel.destLat, lng: selectedVessel.destLng } : null
-        const computedRoute = hasOrigin && hasDest
-            ? calculateShippingRoute(origin, dest, selectedVessel.origin, selectedVessel.destination)
-            : []
-
-        const route = routeFromApi.length >= 2 ? routeFromApi : computedRoute
+        const route = routeFromApi.length >= 2
+            ? routeFromApi
+            : (hasOrigin && hasDest
+                ? [
+                    { lat: selectedVessel.originLat, lng: selectedVessel.originLng, name: selectedVessel.origin || 'Origin', type: 'origin' },
+                    { lat: selectedVessel.destLat, lng: selectedVessel.destLng, name: selectedVessel.destination || 'Destination', type: 'destination' }
+                ]
+                : [])
 
         if (route.length < 2) return { fullRoute: null, completedPath: null, remainingPath: null, routeWaypoints: [], congestionSegments: [] }
 
@@ -371,7 +304,7 @@ function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
                 fullRoute: route,
                 completedPath: completed,
                 remainingPath: remaining,
-                routeWaypoints: route.filter(p => p.type !== 'waypoint'),
+                routeWaypoints: selectRouteMarkers(route),
                 congestionSegments: remainingSegments
             }
         }
@@ -381,7 +314,7 @@ function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
             fullRoute: route,
             completedPath: null,
             remainingPath: route.map(p => [p.lat, p.lng]),
-            routeWaypoints: route.filter(p => p.type !== 'waypoint'),
+            routeWaypoints: selectRouteMarkers(route),
             congestionSegments: segments
         }
     }, [selectedVessel, bottlenecks])

@@ -153,9 +153,110 @@ function parseMyShipTrackingPosition(html) {
     }
 }
 
+async function fetchMyShipTrackingPositionByMmsi(mmsi) {
+    if (!mmsi) return null
+    try {
+        const url = `https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi=${encodeURIComponent(mmsi)}`
+        const res = await fetch(url, {
+            headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
+        })
+        if (!res.ok) return null
+        const raw = (await res.text()).trim()
+        if (!raw) return null
+        const parts = raw.split(/\s+/)
+        if (parts.length < 2) return null
+        const latitude = Number(parts[0])
+        const longitude = Number(parts[1])
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
+        const speed = Number(parts[2])
+        const heading = Number(parts[3])
+        return {
+            latitude,
+            longitude,
+            speed: Number.isFinite(speed) ? speed : null,
+            heading: Number.isFinite(heading) && heading >= 0 && heading <= 360 ? heading : null
+        }
+    } catch (err) {
+        console.error('MyShipTracking vesselonmap error:', err.message)
+        return null
+    }
+}
+
+function parseMyShipTrackingRouteList(xml) {
+    if (!xml) return []
+    const routes = []
+    const blocks = xml.match(new RegExp('<P>[\\s\\S]*?<\\/P>', 'g')) || []
+    blocks.forEach((block) => {
+        const routeId = block.match(/<ROUTEID>([^<]+)<\/ROUTEID>/i)?.[1]?.trim()
+        const name = block.match(/<NAME>([^<]+)<\/NAME>/i)?.[1]?.trim()
+        if (routeId) {
+            routes.push({ id: routeId, name })
+        }
+    })
+    return routes
+}
+
+function parseMyShipTrackingRoutePoints(xml) {
+    if (!xml) return []
+    const points = []
+    const blocks = xml.match(new RegExp('<P>[\\s\\S]*?<\\/P>', 'g')) || []
+    blocks.forEach((block) => {
+        const lat = Number(block.match(/<LAT>([^<]+)<\/LAT>/i)?.[1])
+        const lon = Number(block.match(/<LON>([^<]+)<\/LON>/i)?.[1])
+        const ord = Number(block.match(/<ORD>([^<]+)<\/ORD>/i)?.[1])
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            points.push({ lat, lon, ord: Number.isFinite(ord) ? ord : points.length })
+        }
+    })
+    return points.sort((a, b) => a.ord - b.ord)
+}
+
+async function fetchMyShipTrackingRoute(mmsi, originName, destName) {
+    if (!mmsi) return null
+    try {
+        const portsUrl = `https://www.myshiptracking.com/requests/calc_ports.php?mmsi=${encodeURIComponent(mmsi)}`
+        const portsRes = await fetch(portsUrl, {
+            headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
+        })
+        if (!portsRes.ok) return null
+        const portsXml = await portsRes.text()
+        const routes = parseMyShipTrackingRouteList(portsXml)
+        if (!routes.length) return null
+
+        const routeId = routes[0].id
+        const routeUrl = `https://www.myshiptracking.com/requests/calc_routes.php?route=${encodeURIComponent(routeId)}`
+        const routeRes = await fetch(routeUrl, {
+            headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
+        })
+        if (!routeRes.ok) return null
+        const routeXml = await routeRes.text()
+        const points = parseMyShipTrackingRoutePoints(routeXml)
+        if (points.length < 2) return null
+
+        return points.map((point, index) => ({
+            lat: point.lat,
+            lng: point.lon,
+            name: index === 0 ? (originName || 'Origin') : index === points.length - 1 ? (destName || 'Destination') : `Waypoint ${index}`,
+            type: index === 0 ? 'origin' : index === points.length - 1 ? 'destination' : 'waypoint'
+        }))
+    } catch (err) {
+        console.error('MyShipTracking route fetch failed:', err.message)
+        return null
+    }
+}
+
 async function fetchMyShipTrackingPosition(vessel) {
     const mmsi = vessel?.mmsi ? vessel.mmsi.toString() : null
     const name = vessel?.name || null
+    const quickPosition = mmsi ? await fetchMyShipTrackingPositionByMmsi(mmsi) : null
+    if (quickPosition) {
+        return {
+            ...quickPosition,
+            source: 'myshiptracking',
+            updatedAt: new Date().toISOString(),
+            myShipTrackingUrl: getMyShipTrackingCachedUrl(mmsi, name) || null
+        }
+    }
 
     let url = vessel?.myShipTrackingUrl || getMyShipTrackingCachedUrl(mmsi, name)
     if (!url) {
@@ -192,7 +293,16 @@ async function refreshPositionForVessel(vessel, options = {}) {
     const cacheKey = getPositionCacheKey(vessel.mmsi, vessel.name)
     if (!options.force) {
         const cached = getCachedPosition(cacheKey)
-        if (cached) return cached
+        if (cached) {
+            const updated = { ...vessel }
+            updated.latitude = cached.latitude
+            updated.longitude = cached.longitude
+            updated.speed = cached.speed ?? updated.speed
+            updated.heading = cached.heading ?? updated.heading
+            updated.positionSource = cached.source || updated.positionSource
+            updated.updatedAt = cached.updatedAt || updated.updatedAt
+            return updated
+        }
     }
 
     const livePosition = await fetchMyShipTrackingPosition(vessel)
@@ -212,21 +322,12 @@ async function refreshPositionForVessel(vessel, options = {}) {
     }
 
     await ensurePortCoordinates(updated)
+    await ensureRoute(updated)
 
-    if (updated.origin && updated.destination && updated.originLat && updated.destLat) {
-        const route = calculateRoute(
-            updated.originLat,
-            updated.originLng,
-            updated.destLat,
-            updated.destLng,
-            updated.origin,
-            updated.destination
-        )
-        updated.route = route
-        updated.nextWaypoint = route[1] || null
-
+    if (updated.route && updated.route.length >= 2) {
+        updated.nextWaypoint = updated.route[1] || null
         if (updated.latitude && updated.longitude) {
-            const etaCalc = estimateArrival(route, updated.latitude, updated.longitude, updated.speed || 12)
+            const etaCalc = estimateArrival(updated.route, updated.latitude, updated.longitude, updated.speed || 12)
             updated.eta = etaCalc?.eta || updated.eta
             updated.distanceRemainingNm = etaCalc?.distanceRemaining || null
             updated.hoursRemaining = etaCalc?.hoursRemaining || null
@@ -646,15 +747,12 @@ async function geocodePort(portName) {
 
 async function ensurePortCoordinates(vessel) {
     if (!vessel) return vessel
-    let updated = false
-
     const setOrigin = async () => {
         if (vessel.origin && (!vessel.originLat || !vessel.originLng)) {
             const o = await geocodePort(vessel.origin)
             if (o) {
                 vessel.originLat = o.lat
                 vessel.originLng = o.lon
-                updated = true
             }
         }
     }
@@ -665,18 +763,29 @@ async function ensurePortCoordinates(vessel) {
             if (d) {
                 vessel.destLat = d.lat
                 vessel.destLng = d.lon
-                updated = true
             }
         }
     }
 
     await Promise.all([setOrigin(), setDest()])
 
-    const hasCoords = vessel.originLat && vessel.originLng && vessel.destLat && vessel.destLng
-    const needsRoute = !Array.isArray(vessel.route) || vessel.route.length < 2
-    const needsEta = !!(vessel.latitude && vessel.longitude && !vessel.eta)
+    return vessel
+}
 
-    if (hasCoords && (updated || needsRoute || needsEta)) {
+async function ensureRoute(vessel) {
+    if (!vessel) return vessel
+    const hasCoords = vessel.originLat && vessel.originLng && vessel.destLat && vessel.destLng
+    const hasRoute = Array.isArray(vessel.route) && vessel.route.length >= 2
+
+    if (vessel.mmsi && (!hasRoute || vessel.routeSource === 'searoute')) {
+        const scrapedRoute = await fetchMyShipTrackingRoute(vessel.mmsi, vessel.origin, vessel.destination)
+        if (scrapedRoute && scrapedRoute.length >= 2) {
+            vessel.route = scrapedRoute
+            vessel.routeSource = 'myshiptracking'
+        }
+    }
+
+    if (hasCoords && (!hasRoute || vessel.routeSource !== 'myshiptracking')) {
         vessel.route = calculateRoute(
             vessel.originLat,
             vessel.originLng,
@@ -685,12 +794,7 @@ async function ensurePortCoordinates(vessel) {
             vessel.origin,
             vessel.destination
         )
-        if (vessel.latitude && vessel.longitude) {
-            const etaCalc = estimateArrival(vessel.route, vessel.latitude, vessel.longitude, vessel.speed || 12)
-            vessel.eta = etaCalc?.eta || vessel.eta
-            vessel.distanceRemainingNm = etaCalc?.distanceRemaining || null
-            vessel.hoursRemaining = etaCalc?.hoursRemaining || null
-        }
+        vessel.routeSource = vessel.routeSource || 'searoute'
     }
 
     return vessel
@@ -731,6 +835,7 @@ async function getVesselStatus(mmsi) {
         // ss = speed, cu = course, dest = destination, ts = timestamp
         // name, imo, country, type, gt (gross tonnage), etc.
         const status = {
+            name: data.name || null,
             speed: data.ss ?? null,
             heading: data.cu ?? null,
             currentDestination: data.dest || null,
@@ -972,25 +1077,16 @@ async function createVesselFromImport(details, rawText = '') {
         updatedAt: cachedPosition?.updatedAt || vesselStatus?.lastUpdate || new Date().toISOString()
     }
 
-    // Ensure coords if missing (retry geocode) and compute route
+    // Ensure coords + route
     await ensurePortCoordinates(vessel)
+    await ensureRoute(vessel)
 
-    if (vessel.origin && vessel.destination && vessel.originLat && vessel.destLat) {
-        const route = calculateRoute(
-            vessel.originLat,
-            vessel.originLng,
-            vessel.destLat,
-            vessel.destLng,
-            vessel.origin,
-            vessel.destination
-        )
-        vessel.route = route
-        vessel.nextWaypoint = route[1] || null
-        console.log('Route calculated:', route.length, 'waypoints')
+    if (vessel.route && vessel.route.length >= 2) {
+        vessel.nextWaypoint = vessel.route[1] || null
+        console.log('Route calculated:', vessel.route.length, 'waypoints')
 
-        // Calculate ETA if we have live position
         if (vessel.latitude && vessel.longitude) {
-            const etaCalc = estimateArrival(route, vessel.latitude, vessel.longitude, vessel.speed || 12)
+            const etaCalc = estimateArrival(vessel.route, vessel.latitude, vessel.longitude, vessel.speed || 12)
             vessel.eta = etaCalc?.eta || details.eta || vesselStatus?.eta || null
             vessel.distanceRemainingNm = etaCalc?.distanceRemaining || null
             vessel.hoursRemaining = etaCalc?.hoursRemaining || null
@@ -1121,16 +1217,58 @@ app.post('/api/import/bl', upload.single('file'), async (req, res) => {
 })
 
 app.get('/api/vessels/search', async (req, res) => {
-    const query = (req.query.q || '').toString().trim().toLowerCase()
+    const query = (req.query.q || '').toString().trim()
     if (!query) return res.json({ vessels: [] })
 
     const candidates = [...trackedVessels.values(), ...vesselDatabase]
     const matches = candidates.filter(v =>
-        (v.name || '').toLowerCase().includes(query) ||
+        (v.name || '').toLowerCase().includes(query.toLowerCase()) ||
         (v.mmsi || '').toString().includes(query)
     )
     const unique = Array.from(new Map(matches.map(v => [v.mmsi, v])).values())
-    res.json({ vessels: unique.slice(0, 10) })
+    if (unique.length > 0) {
+        return res.json({ vessels: unique.slice(0, MAX_TRACKED_VESSELS) })
+    }
+
+    let found = null
+    if (/^\\d{9}$/.test(query)) {
+        found = { mmsi: query, name: null, source: 'mmsi' }
+    } else {
+        found = await searchVesselByName(query)
+    }
+
+    if (!found?.mmsi) {
+        return res.json({ vessels: [] })
+    }
+
+    let vessel = trackedVessels.get(found.mmsi) || vesselDatabase.find(v => v.mmsi === found.mmsi)
+    if (!vessel) {
+        const vesselStatus = await getVesselStatus(found.mmsi)
+        vessel = {
+            mmsi: found.mmsi.toString(),
+            name: found.name || vesselStatus?.name || query.toUpperCase(),
+            imo: vesselStatus?.imo || null,
+            flag: vesselStatus?.country || null,
+            shipType: vesselStatus?.vesselType || null,
+            currentDestination: vesselStatus?.currentDestination || null,
+            searchSource: found.source || 'external',
+            importedAt: new Date().toISOString(),
+            updatedAt: vesselStatus?.lastUpdate || new Date().toISOString()
+        }
+    }
+
+    const refreshed = await refreshPositionForVessel(vessel, { force: true })
+    const finalVessel = refreshed || vessel
+
+    trackedVessels.set(finalVessel.mmsi, finalVessel)
+    const idx = vesselDatabase.findIndex(v => v.mmsi === finalVessel.mmsi)
+    if (idx >= 0) {
+        vesselDatabase[idx] = { ...vesselDatabase[idx], ...finalVessel }
+    } else {
+        vesselDatabase.push(finalVessel)
+    }
+
+    res.json({ vessels: [finalVessel] })
 })
 
 app.get('/api/vessels', async (req, res) => {
@@ -1202,23 +1340,12 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
     }
 
     await ensurePortCoordinates(enriched)
+    await ensureRoute(enriched)
 
-    // Calculate route if we have origin/dest coordinates (even without live position)
-    if (enriched.origin && enriched.destination && enriched.originLat && enriched.destLat) {
-        const route = calculateRoute(
-            enriched.originLat,
-            enriched.originLng,
-            enriched.destLat,
-            enriched.destLng,
-            enriched.origin,
-            enriched.destination
-        )
-        enriched.route = route
-        enriched.nextWaypoint = route[1] || null
-
-        // Calculate ETA only if we have current position
+    if (enriched.route && enriched.route.length >= 2) {
+        enriched.nextWaypoint = enriched.route[1] || null
         if (enriched.latitude && enriched.longitude) {
-            const etaCalc = estimateArrival(route, enriched.latitude, enriched.longitude, enriched.speed || 12)
+            const etaCalc = estimateArrival(enriched.route, enriched.latitude, enriched.longitude, enriched.speed || 12)
             enriched.eta = etaCalc?.eta || enriched.eta
             enriched.distanceRemainingNm = etaCalc?.distanceRemaining || null
             enriched.hoursRemaining = etaCalc?.hoursRemaining || null

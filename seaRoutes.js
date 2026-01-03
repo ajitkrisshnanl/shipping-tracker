@@ -1,91 +1,10 @@
 /**
  * Sea Route Calculator
- * Calculates shipping routes between ports following major shipping lanes
+ * Generates realistic sea routes between coordinates.
  */
 
-// Major shipping waypoints (key maritime passages and ports)
-const waypoints = {
-    // Asia
-    kolkata: { lat: 22.5726, lng: 88.3639, name: 'Kolkata', type: 'port' },
-    singapore: { lat: 1.2897, lng: 103.8501, name: 'Singapore', type: 'port' },
-    hongkong: { lat: 22.3193, lng: 114.1694, name: 'Hong Kong', type: 'port' },
-    shanghai: { lat: 31.2304, lng: 121.4737, name: 'Shanghai', type: 'port' },
-    tokyo: { lat: 35.6762, lng: 139.6503, name: 'Tokyo', type: 'port' },
-    busan: { lat: 35.1796, lng: 129.0756, name: 'Busan', type: 'port' },
-    mumbai: { lat: 19.0760, lng: 72.8777, name: 'Mumbai', type: 'port' },
+const searoute = require('searoute-js')
 
-    // Middle East
-    dubai: { lat: 25.2048, lng: 55.2708, name: 'Dubai', type: 'port' },
-    bahrain: { lat: 26.0667, lng: 50.5577, name: 'Bahrain', type: 'port' },
-    jeddah: { lat: 21.4858, lng: 39.1925, name: 'Jeddah', type: 'port' },
-
-    // Key Passages
-    malaccaStrait: { lat: 4.2105, lng: 100.2808, name: 'Malacca Strait', type: 'passage' },
-    babElMandeb: { lat: 12.5833, lng: 43.3333, name: 'Bab el-Mandeb', type: 'passage' },
-    suezNorth: { lat: 31.2653, lng: 32.3019, name: 'Suez Canal (North)', type: 'passage' },
-    suezSouth: { lat: 29.9511, lng: 32.5503, name: 'Suez Canal (South)', type: 'passage' },
-    gibraltar: { lat: 35.9667, lng: -5.5000, name: 'Gibraltar', type: 'passage' },
-    capeOfGoodHope: { lat: -34.3568, lng: 18.4740, name: 'Cape of Good Hope', type: 'passage' },
-    panamaAtlantic: { lat: 9.3817, lng: -79.9181, name: 'Panama (Atlantic)', type: 'passage' },
-    panamaPacific: { lat: 8.9500, lng: -79.5667, name: 'Panama (Pacific)', type: 'passage' },
-
-    // Europe
-    rotterdam: { lat: 51.9225, lng: 4.4792, name: 'Rotterdam', type: 'port' },
-    hamburg: { lat: 53.5511, lng: 9.9937, name: 'Hamburg', type: 'port' },
-    antwerp: { lat: 51.2194, lng: 4.4025, name: 'Antwerp', type: 'port' },
-    felixstowe: { lat: 51.9543, lng: 1.3510, name: 'Felixstowe', type: 'port' },
-
-    // Mediterranean
-    algeciras: { lat: 36.1408, lng: -5.4536, name: 'Algeciras', type: 'port' },
-    piraeus: { lat: 37.9475, lng: 23.6371, name: 'Piraeus', type: 'port' },
-    genoa: { lat: 44.4056, lng: 8.9463, name: 'Genoa', type: 'port' },
-
-    // Americas
-    newyork: { lat: 40.6892, lng: -74.0445, name: 'New York', type: 'port' },
-    norfolk: { lat: 36.8508, lng: -76.2859, name: 'Norfolk, VA', type: 'port' },
-    savannah: { lat: 32.0809, lng: -81.0912, name: 'Savannah', type: 'port' },
-    charleston: { lat: 32.7765, lng: -79.9311, name: 'Charleston', type: 'port' },
-    houston: { lat: 29.7604, lng: -95.3698, name: 'Houston', type: 'port' },
-    miami: { lat: 25.7617, lng: -80.1918, name: 'Miami', type: 'port' },
-    losangeles: { lat: 33.7395, lng: -118.2611, name: 'Los Angeles', type: 'port' },
-
-    // Africa
-    capeTown: { lat: -33.9249, lng: 18.4241, name: 'Cape Town', type: 'port' },
-    durban: { lat: -29.8587, lng: 31.0218, name: 'Durban', type: 'port' },
-    mombasa: { lat: -4.0435, lng: 39.6682, name: 'Mombasa', type: 'port' }
-}
-
-// Common routes through major passages
-const routeTemplates = {
-    asiaToUSEast: ['malaccaStrait', 'singapore', 'babElMandeb', 'suezSouth', 'suezNorth', 'gibraltar', 'newyork'],
-    asiaToUSWest: ['malaccaStrait', 'singapore', 'panamaPacific', 'panamaAtlantic', 'losangeles'],
-    asiaToEurope: ['malaccaStrait', 'singapore', 'babElMandeb', 'suezSouth', 'suezNorth', 'gibraltar', 'rotterdam'],
-    indiaToUSEast: ['mumbai', 'babElMandeb', 'suezSouth', 'suezNorth', 'gibraltar', 'newyork'],
-    indiaToUSEastViaCape: ['mumbai', 'capeOfGoodHope', 'capeTown', 'newyork'],
-    gulfToUSEast: ['babElMandeb', 'suezSouth', 'suezNorth', 'gibraltar', 'newyork'],
-    europeToAsia: ['rotterdam', 'gibraltar', 'suezNorth', 'suezSouth', 'babElMandeb', 'singapore']
-}
-
-/**
- * Find the closest waypoint to a coordinate
- */
-function findClosestWaypoint(lat, lng) {
-    let closest = null
-    let minDist = Infinity
-
-    for (const [id, wp] of Object.entries(waypoints)) {
-        const dist = haversineDistance(lat, lng, wp.lat, wp.lng)
-        if (dist < minDist) {
-            minDist = dist
-            closest = { id, ...wp }
-        }
-    }
-    return closest
-}
-
-/**
- * Haversine distance between two points (in km)
- */
 function haversineDistance(lat1, lng1, lat2, lng2) {
     const R = 6371 // Earth radius in km
     const dLat = (lat2 - lat1) * Math.PI / 180
@@ -97,93 +16,87 @@ function haversineDistance(lat1, lng1, lat2, lng2) {
     return R * c
 }
 
-/**
- * Calculate a shipping route between origin and destination
- * Returns an array of waypoints
- */
+function downsampleCoordinates(coords, maxPoints = 90) {
+    if (!Array.isArray(coords) || coords.length <= maxPoints) return coords || []
+    const step = Math.ceil(coords.length / maxPoints)
+    return coords.filter((_, idx) => idx % step === 0 || idx === coords.length - 1)
+}
+
+function buildSeaRouteCoordinates(originLat, originLng, destLat, destLng) {
+    const origin = {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+            type: 'Point',
+            coordinates: [Number(originLng), Number(originLat)]
+        }
+    }
+    const destination = {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+            type: 'Point',
+            coordinates: [Number(destLng), Number(destLat)]
+        }
+    }
+
+    try {
+        const originalLog = console.log
+        console.log = () => {}
+        let route = null
+        try {
+            route = searoute(origin, destination)
+        } finally {
+            console.log = originalLog
+        }
+        const coords = route?.geometry?.coordinates
+        if (!Array.isArray(coords) || coords.length < 2) return null
+        return coords
+    } catch (err) {
+        console.error('Sea route calc failed:', err.message)
+        return null
+    }
+}
+
 function calculateRoute(originLat, originLng, destLat, destLng, originName, destName) {
+    const coords = buildSeaRouteCoordinates(originLat, originLng, destLat, destLng)
+    const points = downsampleCoordinates(coords || [], 80)
+
     const route = []
+    const start = [Number(originLng), Number(originLat)]
+    const end = [Number(destLng), Number(destLat)]
 
-    // Start point
-    route.push({ lat: originLat, lng: originLng, name: originName || 'Origin', type: 'origin' })
-
-    // Determine if we need to go through Suez, Panama, or Cape
-    const originInAsia = originLng > 60 && originLng < 145
-    const originInIndia = originLat > 8 && originLat < 35 && originLng > 68 && originLng < 92
-    const originInGulf = originLat > 15 && originLat < 32 && originLng > 45 && originLng < 60
-    const destInAmericas = destLng < -30
-    const destInEurope = destLat > 35 && destLng > -15 && destLng < 35
-    const destInUSEast = destLng > -85 && destLng < -65 && destLat > 25 && destLat < 45
-    const destInAmericasEast = destLng < -30 && destLng > -100
-    const destInUSWest = destLng < -115 && destLat > 25 && destLat < 50
-    const destInAsia = destLng > 60 && destLng < 145
-
-    // India to US East Coast (like Kolkata to Norfolk)
-    if (originInIndia && (destInUSEast || destInAmericasEast)) {
-        // Via Suez Canal route
-        route.push(waypoints.babElMandeb)
-        route.push(waypoints.suezSouth)
-        route.push(waypoints.suezNorth)
-        route.push(waypoints.gibraltar)
-        // Cross Atlantic
-        route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
-    }
-    // Gulf (Bahrain) to US East
-    else if (originInGulf && (destInUSEast || destInAmericasEast)) {
-        route.push({ lat: 26.0, lng: 56.0, name: 'Strait of Hormuz', type: 'passage' })
-        route.push(waypoints.babElMandeb)
-        route.push(waypoints.suezSouth)
-        route.push(waypoints.suezNorth)
-        route.push(waypoints.gibraltar)
-        route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
-    }
-    // Asia to US East Coast via Suez
-    else if (originInAsia && (destInUSEast || destInAmericasEast)) {
-        route.push(waypoints.singapore)
-        route.push(waypoints.malaccaStrait)
-        route.push(waypoints.babElMandeb)
-        route.push(waypoints.suezSouth)
-        route.push(waypoints.suezNorth)
-        route.push(waypoints.gibraltar)
-        route.push({ lat: 38, lng: -30, name: 'Mid-Atlantic', type: 'waypoint' })
-    }
-    // Asia to US West Coast via Pacific
-    else if (originInAsia && destInUSWest) {
-        route.push(waypoints.shanghai)
-        route.push({ lat: 35, lng: 150, name: 'North Pacific', type: 'waypoint' })
-        route.push({ lat: 40, lng: -150, name: 'Eastern Pacific', type: 'waypoint' })
-    }
-    // Europe to Asia via Suez
-    else if (destInAsia && originLng < 30) {
-        route.push(waypoints.gibraltar)
-        route.push(waypoints.suezNorth)
-        route.push(waypoints.suezSouth)
-        route.push(waypoints.babElMandeb)
-        route.push(waypoints.singapore)
-    }
-    // Default: great circle with intermediate points
-    else {
-        const midLat = (originLat + destLat) / 2
-        const midLng = (originLng + destLng) / 2
-        route.push({ lat: midLat, lng: midLng, name: 'En Route', type: 'waypoint' })
+    if (points.length < 2) {
+        route.push({ lat: originLat, lng: originLng, name: originName || 'Origin', type: 'origin' })
+        route.push({ lat: destLat, lng: destLng, name: destName || 'Destination', type: 'destination' })
+        return route
     }
 
-    // End point
-    route.push({ lat: destLat, lng: destLng, name: destName || 'Destination', type: 'destination' })
+    points[0] = start
+    points[points.length - 1] = end
+
+    points.forEach((coord, index) => {
+        const lat = Number(coord[1])
+        const lng = Number(coord[0])
+        const isStart = index === 0
+        const isEnd = index === points.length - 1
+        route.push({
+            lat,
+            lng,
+            name: isStart ? (originName || 'Origin') : isEnd ? (destName || 'Destination') : `Waypoint ${index}`,
+            type: isStart ? 'origin' : isEnd ? 'destination' : 'waypoint'
+        })
+    })
 
     return route
 }
 
-/**
- * Split route into completed and remaining segments based on current position
- */
 function splitRouteByPosition(route, currentLat, currentLng) {
     if (!route || route.length < 2) return { completed: [], remaining: route || [] }
 
     let closestIndex = 0
     let minDist = Infinity
 
-    // Find the closest segment to current position
     for (let i = 0; i < route.length; i++) {
         const dist = haversineDistance(currentLat, currentLng, route[i].lat, route[i].lng)
         if (dist < minDist) {
@@ -192,7 +105,6 @@ function splitRouteByPosition(route, currentLat, currentLng) {
         }
     }
 
-    // Split route
     const completed = route.slice(0, closestIndex + 1)
     completed.push({ lat: currentLat, lng: currentLng, name: 'Current Position', type: 'current' })
 
@@ -202,9 +114,6 @@ function splitRouteByPosition(route, currentLat, currentLng) {
     return { completed, remaining }
 }
 
-/**
- * Calculate total distance of route in nautical miles
- */
 function calculateRouteDistance(route) {
     let totalKm = 0
     for (let i = 0; i < route.length - 1; i++) {
@@ -213,9 +122,6 @@ function calculateRouteDistance(route) {
     return totalKm * 0.539957 // Convert km to nautical miles
 }
 
-/**
- * Estimate arrival time based on route, current position, and speed
- */
 function estimateArrival(route, currentLat, currentLng, speedKnots) {
     const { remaining } = splitRouteByPosition(route, currentLat, currentLng)
     const remainingDistance = calculateRouteDistance(remaining)
@@ -229,11 +135,9 @@ function estimateArrival(route, currentLat, currentLng, speedKnots) {
 }
 
 module.exports = {
-    waypoints,
     calculateRoute,
     splitRouteByPosition,
     calculateRouteDistance,
     estimateArrival,
-    haversineDistance,
-    findClosestWaypoint
+    haversineDistance
 }
