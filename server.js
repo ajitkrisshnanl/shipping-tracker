@@ -1,18 +1,19 @@
 /**
- * Backend Server - Express + WebSocket for AIS vessel tracking
+ * Backend Server - Express + WebSocket for vessel tracking
  *
- * Uses AI-powered extraction (Google Gemini 3 Flash) to parse any Bill of Lading format.
- * Uses AIS Stream (Airstream) WebSocket for live vessel tracking.
+ * Uses AI-powered extraction (Google Gemini 3 Flash with GPT-4o fallback) to parse any Bill of Lading format.
+ * Uses live web scraping for vessel tracking (no AIS WebSocket dependency).
  */
 
 const express = require('express')
 const cors = require('cors')
-const { WebSocketServer, WebSocket } = require('ws')
+const { WebSocketServer } = require('ws')
 const http = require('http')
 const path = require('path')
 const multer = require('multer')
 const pdfParse = require('pdf-parse')
 const { GoogleGenerativeAI } = require('@google/generative-ai')
+const OpenAI = require('openai')
 const { getBottlenecks, checkBottleneckProximity } = require('./bottlenecks')
 const { calculateRoute, estimateArrival } = require('./seaRoutes')
 
@@ -20,6 +21,15 @@ const { calculateRoute, estimateArrival } = require('./seaRoutes')
 const genAI = process.env.GEMINI_API_KEY
     ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
     : null
+
+// Initialize OpenAI client (fallback)
+const openai = process.env.OPENAI_API_KEY
+    ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    : null
+const OPENAI_MODELS = [
+    process.env.OPENAI_MODEL || 'gpt-5.1',
+    process.env.OPENAI_FALLBACK_MODEL || 'gpt-4.1'
+]
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -37,219 +47,241 @@ const upload = multer({
 // In-memory vessel storage
 let vesselDatabase = []
 const trackedVessels = new Map()
-
-// AIS Stream API Key (Airstream WebSocket)
-const AIS_API_KEY = process.env.AIS_API_KEY || process.env.AIRSTREAM_API || null
-
-// AIS Stream Connection
-let aisSocket = null
-const subscribedMmsi = new Set()
-let subscriptionDebounce = null
-let reconnectTimer = null
-
-// Dynamic bounding boxes for AIS subscriptions (start with global; add smaller boxes when hunting by name)
-const dynamicBoundingBoxes = new Set([JSON.stringify([[-90, -180], [90, 180]])])
-
-// Pending vessel name hunts (when MMSI is unknown). Keyed by normalized name.
-const pendingNameLookups = new Map()
-
-function addBoundingBox(box) {
-    if (!Array.isArray(box) || box.length !== 2) return
-    const key = JSON.stringify(box)
-    if (!dynamicBoundingBoxes.has(key)) {
-        dynamicBoundingBoxes.add(key)
-        queueSubscriptionUpdate()
-    }
+const positionCache = new Map()
+const myShipTrackingUrlCache = new Map()
+const POSITION_REFRESH_MS = Number(process.env.POSITION_REFRESH_MS || 3600000)
+const POSITION_CACHE_TTL_MS = Number(process.env.POSITION_CACHE_TTL_MS || 25000)
+const MAX_TRACKED_VESSELS = Number(process.env.MAX_TRACKED_VESSELS || 10)
+let positionRefreshTimer = null
+let positionRefreshInFlight = false
+const SCRAPE_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'text/html'
 }
 
-function getBoundingBoxesForSubscription() {
-    const boxes = Array.from(dynamicBoundingBoxes).map((b) => JSON.parse(b))
-    return boxes.length ? boxes : [[[-90, -180], [90, 180]]]
+function getPositionCacheKey(mmsi, name) {
+    if (mmsi) return mmsi.toString()
+    if (name) return normalizeName(name)
+    return null
 }
-function ensureAISConnection() {
-    if (!AIS_API_KEY) {
-        console.log('No AIS_API_KEY/AIRSTREAM_API configured - AIS tracking disabled')
-        return
+
+function getCachedPosition(key) {
+    if (!key) return null
+    const cached = positionCache.get(key)
+    if (!cached) return null
+    if (Date.now() - cached.timestamp > POSITION_CACHE_TTL_MS) {
+        positionCache.delete(key)
+        return null
     }
-    if (aisSocket && (aisSocket.readyState === WebSocket.OPEN || aisSocket.readyState === WebSocket.CONNECTING)) return
+    return cached.data
+}
 
-    console.log('Connecting to AIS Stream...')
-    aisSocket = new WebSocket('wss://stream.aisstream.io/v0/stream')
+function setCachedPosition(key, data) {
+    if (!key || !data) return
+    positionCache.set(key, { data, timestamp: Date.now() })
+}
 
-    aisSocket.on('open', () => {
-        console.log('AIS Stream connected')
-        sendAisSubscription()
-    })
+function getMyShipTrackingCachedUrl(mmsi, name) {
+    if (mmsi && myShipTrackingUrlCache.has(mmsi.toString())) return myShipTrackingUrlCache.get(mmsi.toString())
+    const nameKey = name ? normalizeName(name) : null
+    if (nameKey && myShipTrackingUrlCache.has(nameKey)) return myShipTrackingUrlCache.get(nameKey)
+    return null
+}
 
-    aisSocket.on('message', (event) => {
-        try {
-            // Handle both string and Buffer data
-            const data = typeof event === 'string' ? event : event.toString()
-            if (!data || data === 'undefined') return
-            const message = JSON.parse(data)
-            handleAisMessage(message)
-        } catch (err) {
-            // Only log if it's an actual parse error, not empty messages
-            if (err.message !== "Unexpected token 'u', \"undefined\" is not valid JSON") {
-                console.error('AIS message parse error:', err.message)
-            }
+function cacheMyShipTrackingUrl(mmsi, name, url) {
+    if (!url) return
+    if (mmsi) myShipTrackingUrlCache.set(mmsi.toString(), url)
+    if (name) myShipTrackingUrlCache.set(normalizeName(name), url)
+}
+
+async function resolveMyShipTrackingInfo(mmsi, name) {
+    const cachedUrl = getMyShipTrackingCachedUrl(mmsi, name)
+    if (cachedUrl) return { url: cachedUrl, mmsi: mmsi ? mmsi.toString() : null, name }
+
+    const term = mmsi || name
+    if (!term) return null
+
+    try {
+        const searchUrl = `https://www.myshiptracking.com/vessels?name=${encodeURIComponent(term)}`
+        const res = await fetch(searchUrl, {
+            headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
+        })
+        if (!res.ok) return null
+        const html = await res.text()
+
+        let linkMatch = null
+        if (mmsi) {
+            const escaped = mmsi.toString().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            linkMatch = html.match(new RegExp(`href=\"(\\/vessels\\/[^\"\\s]*-mmsi-${escaped}-[^\"\\s]*)\"`, 'i'))
         }
-    })
+        if (!linkMatch) {
+            linkMatch = html.match(/href=\"(\/vessels\/[^\"\s]+)\"/i)
+        }
+        if (!linkMatch) return null
 
-    aisSocket.on('error', (err) => {
-        console.error('AIS socket error', err.message)
-    })
+        const link = linkMatch[1]
+        const url = `https://www.myshiptracking.com${link}`
+        const mmsiMatch = link.match(/-mmsi-(\d{9})-/i)
+        const nameMatch = link.match(/\/vessels\/([^\/]+?)-mmsi-\d{9}/i)
+        const resolvedName = nameMatch ? nameMatch[1].replace(/-/g, ' ').toUpperCase() : name
+        const resolvedMmsi = mmsiMatch ? mmsiMatch[1] : (mmsi ? mmsi.toString() : null)
 
-    aisSocket.on('close', () => {
-        console.log('AIS Stream disconnected, reconnecting...')
-        aisSocket = null
-        if (reconnectTimer) clearTimeout(reconnectTimer)
-        reconnectTimer = setTimeout(() => ensureAISConnection(), 4000)
-    })
-}
-
-function sendAisSubscription() {
-    if (!aisSocket || aisSocket.readyState !== WebSocket.OPEN) return
-    const boxes = getBoundingBoxesForSubscription()
-    const payload = {
-        APIKey: AIS_API_KEY,
-        BoundingBoxes: boxes,
-        FiltersShipMMSI: subscribedMmsi.size > 0 ? Array.from(subscribedMmsi).slice(0, 50) : undefined,
-        FilterMessageTypes: ["PositionReport", "ShipStaticData", "ExtendedClassBPositionReport", "StandardClassBPositionReport", "StaticDataReport"]
+        cacheMyShipTrackingUrl(resolvedMmsi, resolvedName, url)
+        return { url, mmsi: resolvedMmsi, name: resolvedName }
+    } catch (err) {
+        console.error('MyShipTracking resolve failed:', err.message)
+        return null
     }
-    aisSocket.send(JSON.stringify(payload))
-    console.log('AIS subscription sent for', subscribedMmsi.size, 'vessels', 'boxes:', boxes.length)
 }
 
-function queueSubscriptionUpdate() {
-    if (subscriptionDebounce) clearTimeout(subscriptionDebounce)
-    subscriptionDebounce = setTimeout(() => sendAisSubscription(), 300)
-}
+function parseMyShipTrackingPosition(html) {
+    if (!html) return null
+    const match = html.match(/canvas_map_generate\("map_locator"\s*,\s*\d+\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)/i)
+    if (!match) return null
 
-function subscribeToMMSI(mmsi) {
-    if (!mmsi || mmsi.toString().startsWith('SIM') || mmsi.toString().startsWith('PENDING')) return // Don't subscribe simulated/pending vessels
-    subscribedMmsi.add(mmsi.toString())
-    ensureAISConnection()
-    queueSubscriptionUpdate()
-}
+    const latitude = Number(match[1])
+    const longitude = Number(match[2])
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
 
-async function handleAisMessage(message) {
-    const meta = message.MetaData || {}
-    const type = message.MessageType
-    const body = message.Message?.[type] || {}
-
-    let mmsi = meta.MMSI || body.UserID || body.MMSI || body.ShipMMSI
-    if (!mmsi) return
-    mmsi = mmsi.toString()
-
-    const existing = trackedVessels.get(mmsi) || {}
-    const updated = { ...existing, mmsi }
-
-    const latitude = meta.latitude ?? meta.Latitude ?? body.Latitude
-    const longitude = meta.longitude ?? meta.Longitude ?? body.Longitude
-    if (latitude !== undefined && longitude !== undefined) {
-        updated.latitude = Number(latitude)
-        updated.longitude = Number(longitude)
-        updated.positionSource = 'ais-stream'
+    const heading = Number(match[3])
+    const speed = Number(match[4])
+    return {
+        latitude,
+        longitude,
+        heading: Number.isFinite(heading) ? heading : null,
+        speed: Number.isFinite(speed) ? speed : null
     }
+}
 
-    if (body.Sog !== undefined) updated.speed = Number(body.Sog)
-    if (body.Cog !== undefined) updated.cog = Number(body.Cog)
-    if (body.TrueHeading !== undefined) updated.heading = Number(body.TrueHeading)
+async function fetchMyShipTrackingPosition(vessel) {
+    const mmsi = vessel?.mmsi ? vessel.mmsi.toString() : null
+    const name = vessel?.name || null
 
-    const vesselName = meta.ShipName || body.Name
-    if (vesselName) updated.name = vesselName.trim()
-    if (meta.ShipType || body.Type) updated.shipType = meta.ShipType || body.Type
-
-    const destinationName = meta.Destination || meta.ShipDestination || body.Destination
-    if (destinationName) {
-        updated.destination = destinationName.trim()
-        if (!updated.destLat || !updated.destLng) {
-            geocodePort(destinationName).then(coords => {
-                if (coords) {
-                    const current = trackedVessels.get(mmsi) || updated
-                    trackedVessels.set(mmsi, {
-                        ...current,
-                        destLat: coords.lat,
-                        destLng: coords.lon
-                    })
-                }
-            })
+    let url = vessel?.myShipTrackingUrl || getMyShipTrackingCachedUrl(mmsi, name)
+    if (!url) {
+        const resolved = await resolveMyShipTrackingInfo(mmsi, name)
+        url = resolved?.url || null
+        if (resolved?.mmsi || resolved?.name) {
+            cacheMyShipTrackingUrl(resolved?.mmsi || mmsi, resolved?.name || name, url)
         }
     }
+    if (!url) return null
+
+    try {
+        const res = await fetch(url, {
+            headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
+        })
+        if (!res.ok) return null
+        const html = await res.text()
+        const position = parseMyShipTrackingPosition(html)
+        if (!position) return null
+        return {
+            ...position,
+            source: 'myshiptracking',
+            updatedAt: new Date().toISOString(),
+            myShipTrackingUrl: url
+        }
+    } catch (err) {
+        console.error('MyShipTracking position fetch failed:', err.message)
+        return null
+    }
+}
+
+async function refreshPositionForVessel(vessel, options = {}) {
+    if (!vessel) return null
+    const cacheKey = getPositionCacheKey(vessel.mmsi, vessel.name)
+    if (!options.force) {
+        const cached = getCachedPosition(cacheKey)
+        if (cached) return cached
+    }
+
+    const livePosition = await fetchMyShipTrackingPosition(vessel)
+    if (!livePosition) return null
+
+    const updated = { ...vessel }
+    updated.latitude = livePosition.latitude
+    updated.longitude = livePosition.longitude
+    updated.speed = livePosition.speed ?? updated.speed
+    updated.heading = livePosition.heading ?? updated.heading
+    updated.positionSource = livePosition.source
+    updated.updatedAt = livePosition.updatedAt
+    updated.myShipTrackingUrl = livePosition.myShipTrackingUrl || updated.myShipTrackingUrl
 
     if (updated.latitude !== undefined && updated.longitude !== undefined) {
         updated.bottleneckWarning = checkBottleneckProximity(updated.latitude, updated.longitude)
     }
 
-    // Ensure port coords if missing (async geocode) and update route/ETA
     await ensurePortCoordinates(updated)
 
-    if (updated.origin && updated.destination && updated.latitude && updated.longitude && updated.route) {
+    if (updated.origin && updated.destination && updated.originLat && updated.destLat) {
         const route = calculateRoute(
-            updated.originLat || updated.latitude,
-            updated.originLng || updated.longitude,
-            updated.destLat || updated.latitude,
-            updated.destLng || updated.longitude,
+            updated.originLat,
+            updated.originLng,
+            updated.destLat,
+            updated.destLng,
             updated.origin,
             updated.destination
         )
-        const etaCalc = estimateArrival(route, updated.latitude, updated.longitude, updated.speed || 12)
-        if (etaCalc?.eta) updated.eta = etaCalc.eta
         updated.route = route
-        updated.distanceRemainingNm = etaCalc?.distanceRemaining || null
-        updated.hoursRemaining = etaCalc?.hoursRemaining || null
-    }
+        updated.nextWaypoint = route[1] || null
 
-    // If this matches a pending name hunt, bind the MMSI and upgrade the record
-    const normName = normalizeName(vesselName || '')
-    if (normName && pendingNameLookups.has(normName)) {
-        const pending = pendingNameLookups.get(normName)
-        pendingNameLookups.delete(normName)
-
-        const seeded = pending.seed || {}
-        // Remove pending placeholder
-        if (pending.pendingId) {
-            trackedVessels.delete(pending.pendingId)
-            const idx = vesselDatabase.findIndex(v => v.mmsi === pending.pendingId)
-            if (idx >= 0) vesselDatabase.splice(idx, 1)
+        if (updated.latitude && updated.longitude) {
+            const etaCalc = estimateArrival(route, updated.latitude, updated.longitude, updated.speed || 12)
+            updated.eta = updated.eta || etaCalc?.eta
+            updated.distanceRemainingNm = etaCalc?.distanceRemaining || null
+            updated.hoursRemaining = etaCalc?.hoursRemaining || null
         }
-
-        updated.origin = updated.origin || seeded.origin
-        updated.destination = updated.destination || seeded.destination
-        updated.originLat = updated.originLat || seeded.originLat
-        updated.originLng = updated.originLng || seeded.originLng
-        updated.destLat = updated.destLat || seeded.destLat
-        updated.destLng = updated.destLng || seeded.destLng
-        updated.route = updated.route || seeded.route
-        updated.eta = updated.eta || seeded.eta
-        updated.searching = false
-        updated.searchSource = 'aisstream-name-hunt'
-        updated.updatedAt = new Date().toISOString()
-
-        subscribeToMMSI(mmsi)
-        console.log('Bound pending vessel to MMSI via AIS name match:', vesselName, mmsi)
     }
 
-    updated.updatedAt = new Date().toISOString()
-    trackedVessels.set(mmsi, updated)
-
-    // Also update vesselDatabase if this vessel was imported
-    const dbIdx = vesselDatabase.findIndex(v => v.mmsi === mmsi)
-    if (dbIdx >= 0) {
-        vesselDatabase[dbIdx] = { ...vesselDatabase[dbIdx], ...updated }
+    if (updated.mmsi) {
+        trackedVessels.set(updated.mmsi.toString(), updated)
+        const dbIdx = vesselDatabase.findIndex(v => v.mmsi === updated.mmsi)
+        if (dbIdx >= 0) {
+            vesselDatabase[dbIdx] = { ...vesselDatabase[dbIdx], ...updated }
+        }
     }
+
+    setCachedPosition(cacheKey, {
+        latitude: updated.latitude,
+        longitude: updated.longitude,
+        speed: updated.speed,
+        heading: updated.heading,
+        source: updated.positionSource,
+        updatedAt: updated.updatedAt
+    })
+
+    return updated
+}
+
+async function refreshTrackedPositions() {
+    if (positionRefreshInFlight) return
+    positionRefreshInFlight = true
+    try {
+        const combined = [...vesselDatabase, ...Array.from(trackedVessels.values())]
+        const unique = Array.from(new Map(combined.map(v => [v.mmsi, v])).values())
+        const list = unique.filter(v => v?.mmsi).slice(0, MAX_TRACKED_VESSELS)
+        for (const vessel of list) {
+            await refreshPositionForVessel(vessel)
+        }
+    } catch (err) {
+        console.error('Position refresh error:', err.message)
+    } finally {
+        positionRefreshInFlight = false
+    }
+}
+
+function startPositionRefresh() {
+    if (positionRefreshTimer) return
+    refreshTrackedPositions()
+    positionRefreshTimer = setInterval(refreshTrackedPositions, POSITION_REFRESH_MS)
 }
 
 // ============================================
 // AI-POWERED PDF EXTRACTION
 // ============================================
 
-async function extractVesselDetailsFromPDFImage(pdfBuffer) {
-    if (!genAI) return null
-
-    const prompt = `You are a shipping document parser. This is a scanned Bill of Lading document.
-Extract vessel and shipping details from this document image.
+const EXTRACTION_PROMPT = `You are a shipping document parser. This is a Bill of Lading document.
+Extract vessel and shipping details from this document.
 
 Return ONLY a valid JSON object with these fields (use null for missing values):
 {
@@ -269,6 +301,9 @@ Important rules:
 - Vessel name should be just the ship name without voyage number
 - Return ONLY valid JSON, no markdown code blocks, no explanation`
 
+async function extractWithGemini(pdfBuffer) {
+    if (!genAI) return null
+
     try {
         const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' })
         const result = await model.generateContent({
@@ -276,7 +311,7 @@ Important rules:
                 role: 'user',
                 parts: [
                     { inlineData: { mimeType: 'application/pdf', data: pdfBuffer.toString('base64') } },
-                    { text: prompt }
+                    { text: EXTRACTION_PROMPT }
                 ]
             }],
             generationConfig: { temperature: 0, maxOutputTokens: 2000 }
@@ -285,12 +320,153 @@ Important rules:
         const content = result.response.text() || '{}'
         const cleanContent = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
         const parsed = JSON.parse(cleanContent)
-        console.log('Gemini vision extracted:', parsed)
+        console.log('Gemini 3 Flash extracted:', parsed)
         return parsed
     } catch (error) {
-        console.error('Gemini vision extraction error:', error.message)
+        console.error('Gemini extraction error:', error.message)
         return null
     }
+}
+
+async function extractWithOpenAIText(text) {
+    if (!openai || !text || text.length < 50) return null
+
+    let lastError = null
+    for (const model of OPENAI_MODELS) {
+        try {
+            const response = await openai.responses.create({
+                model,
+                input: [
+                    {
+                        role: 'user',
+                        content: [
+                            { type: 'input_text', text: `${EXTRACTION_PROMPT}\n\nDocument text:\n${text.substring(0, 15000)}` }
+                        ]
+                    }
+                ],
+                max_output_tokens: 2000,
+                temperature: 0
+            })
+
+            const content = response.output_text || '{}'
+            const cleanContent = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+            const parsed = JSON.parse(cleanContent)
+            console.log(`${model} extracted:`, parsed)
+            return parsed
+        } catch (error) {
+            lastError = error
+            console.error(`OpenAI text extraction error (${model}):`, error.message)
+        }
+    }
+
+    if (lastError) return null
+    return null
+}
+
+async function extractWithOpenAIPDF(pdfBuffer) {
+    if (!openai) return null
+
+    let file = null
+    try {
+        const fs = require('fs')
+        const os = require('os')
+        const crypto = require('crypto')
+
+        const tempDir = os.tmpdir()
+        const tempId = crypto.randomBytes(8).toString('hex')
+        const tempPdfPath = path.join(tempDir, `bl_${tempId}.pdf`)
+
+        // Write PDF buffer to temp file
+        fs.writeFileSync(tempPdfPath, pdfBuffer)
+
+        console.log('Uploading PDF to OpenAI...')
+
+        // Upload file to OpenAI
+        file = await openai.files.create({
+            file: fs.createReadStream(tempPdfPath),
+            purpose: 'assistants'
+        })
+
+        console.log('PDF uploaded, file ID:', file.id)
+
+        // Clean up temp file
+        try { fs.unlinkSync(tempPdfPath) } catch (e) { /* ignore */ }
+
+        let lastError = null
+        for (const model of OPENAI_MODELS) {
+            try {
+                console.log(`Calling ${model} with PDF file...`)
+                const response = await openai.responses.create({
+                    model,
+                    input: [
+                        {
+                            role: 'user',
+                            content: [
+                                {
+                                    type: 'input_file',
+                                    file_id: file.id
+                                },
+                                {
+                                    type: 'input_text',
+                                    text: EXTRACTION_PROMPT
+                                }
+                            ]
+                        }
+                    ],
+                    max_output_tokens: 2000,
+                    temperature: 0
+                })
+
+                const content = response.output_text || '{}'
+                const cleanContent = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+                const parsed = JSON.parse(cleanContent)
+                console.log(`${model} PDF extracted:`, parsed)
+                return parsed
+            } catch (error) {
+                lastError = error
+                console.error(`OpenAI PDF extraction error (${model}):`, error.message)
+            }
+        }
+
+        if (lastError) return null
+        return null
+    } catch (error) {
+        console.error('OpenAI PDF extraction error:', error.message)
+        return null
+    } finally {
+        if (openai && file?.id) {
+            try {
+                await openai.files.del(file.id)
+                console.log('Deleted uploaded file:', file.id)
+            } catch (e) { /* ignore deletion errors */ }
+        }
+    }
+}
+
+async function extractVesselDetailsFromPDFImage(pdfBuffer, extractedText = '') {
+    // Try Gemini 3 Flash first (supports PDF directly)
+    let result = await extractWithGemini(pdfBuffer)
+    if (result && result.vessel) {
+        return result
+    }
+
+    // Fallback to OpenAI with PDF file upload
+    console.log('Gemini failed, trying OpenAI PDF fallback...')
+    result = await extractWithOpenAIPDF(pdfBuffer)
+    if (result && result.vessel) {
+        return result
+    }
+
+    // Last resort: try OpenAI with extracted text (if any)
+    if (extractedText && extractedText.length > 50) {
+        console.log('OpenAI PDF failed, trying with text...')
+        result = await extractWithOpenAIText(extractedText)
+        if (result && result.vessel) {
+            return result
+        }
+    }
+
+    return null
 }
 
 async function extractVesselDetailsWithAI(text) {
@@ -298,54 +474,35 @@ async function extractVesselDetailsWithAI(text) {
         return { vessel: null, voyage: null, origin: null, destination: null, eta: null, blNumber: null }
     }
 
-    if (!genAI) {
-        console.log('Gemini API not configured')
-        return { vessel: null, voyage: null, origin: null, destination: null, eta: null, blNumber: null }
+    // Try Gemini first
+    if (genAI) {
+        try {
+            const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' })
+            const result = await model.generateContent({
+                contents: [{ role: 'user', parts: [{ text: `${EXTRACTION_PROMPT}\n\nDocument text:\n${text.substring(0, 15000)}` }] }],
+                generationConfig: { temperature: 0, maxOutputTokens: 2000 }
+            })
+
+            const content = result.response.text() || '{}'
+            const cleanContent = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+            const parsed = JSON.parse(cleanContent)
+            if (parsed && parsed.vessel) {
+                console.log('Gemini 3 Flash extracted:', parsed)
+                return parsed
+            }
+        } catch (error) {
+            console.error('Gemini text extraction error:', error.message)
+        }
     }
 
-    const truncatedText = text.substring(0, 15000)
-
-    const prompt = `You are a shipping document parser. Extract vessel and shipping details from this Bill of Lading text.
-
-Return ONLY a valid JSON object with these fields (use null for missing values):
-{
-  "vessel": "vessel/ship name",
-  "voyage": "voyage number",
-  "origin": "port of loading / place of receipt",
-  "destination": "port of discharge / place of delivery / final destination",
-  "eta": "estimated arrival date or shipped on board date",
-  "blNumber": "bill of lading number",
-  "shipper": "shipper/exporter name",
-  "consignee": "consignee name",
-  "mmsi": "9-digit MMSI number if visible"
-}
-
-Important rules:
-- Extract the actual port/city names, not labels like "PORT OF LOADING"
-- Vessel name should be just the ship name without voyage number
-- Voyage number is typically alphanumeric like "005S" or "0023"
-- For destination, prefer the final delivery location if multiple ports are listed
-- Return ONLY valid JSON, no markdown code blocks, no explanation
-
-Bill of Lading text:
-${truncatedText}`
-
-    try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' })
-        const result = await model.generateContent({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0, maxOutputTokens: 2000 }
-        })
-
-        const content = result.response.text() || '{}'
-        const cleanContent = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-        const parsed = JSON.parse(cleanContent)
-        console.log('Gemini extracted vessel details:', parsed)
-        return parsed
-    } catch (error) {
-        console.error('Gemini extraction error:', error.message)
-        return { vessel: null, voyage: null, origin: null, destination: null, eta: null, blNumber: null }
+    // Fallback to OpenAI
+    console.log('Gemini failed, trying OpenAI for text extraction...')
+    const gptResult = await extractWithOpenAIText(text)
+    if (gptResult && gptResult.vessel) {
+        return gptResult
     }
+
+    return { vessel: null, voyage: null, origin: null, destination: null, eta: null, blNumber: null }
 }
 
 // Port geocoding via Nominatim OpenStreetMap
@@ -390,6 +547,9 @@ function simplifyPortName(portName) {
     return [...new Set(variants)] // Remove duplicates
 }
 
+// Geocode API key for geocode.maps.co (from environment variable)
+const GEOCODE_API_KEY = process.env.GEOCODE_API_KEY
+
 async function geocodePort(portName) {
     if (!portName) return null
     const cacheKey = portName.trim().toLowerCase()
@@ -398,7 +558,31 @@ async function geocodePort(portName) {
     const variants = simplifyPortName(portName)
     console.log('Geocoding port:', portName, '- trying variants:', variants.slice(0, 3).join(', '))
 
-    // Nominatim with proper headers (Render-friendly)
+    // geocode.maps.co - primary (with API key)
+    for (const searchTerm of variants.slice(0, 3)) {
+        try {
+            const url = `https://geocode.maps.co/search?q=${encodeURIComponent(searchTerm)}&api_key=${GEOCODE_API_KEY}&limit=1`
+            const res = await fetch(url, {
+                headers: { 'Accept': 'application/json' }
+            })
+
+            if (res.ok) {
+                const data = await res.json()
+                if (Array.isArray(data) && data[0]) {
+                    const coords = { lat: Number(data[0].lat), lon: Number(data[0].lon) }
+                    console.log('Geocoded (maps.co)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
+                    geocodeCache.set(cacheKey, coords)
+                    return coords
+                }
+            }
+        } catch (err) {
+            console.error('maps.co geocode error for', searchTerm, ':', err.message)
+        }
+        // Rate limit - 1 request per second for free tier
+        await new Promise(r => setTimeout(r, 1000))
+    }
+
+    // Nominatim fallback
     for (const searchTerm of variants) {
         const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(searchTerm)}`
         try {
@@ -413,7 +597,6 @@ async function geocodePort(portName) {
             })
 
             if (res.status === 403 || res.status === 503 || res.status === 429) {
-                console.log('Nominatim blocked/rate-limited, trying next variant')
                 continue
             }
 
@@ -428,31 +611,7 @@ async function geocodePort(portName) {
                 return coords
             }
         } catch (err) {
-            console.error('Nominatim error for', searchTerm, ':', err.message)
-        }
-    }
-
-    // Secondary free OSM endpoint (geocode.maps.co) as fallback
-    for (const searchTerm of variants) {
-        const url = `https://geocode.maps.co/search?q=${encodeURIComponent(searchTerm)}&limit=1`
-        try {
-            await new Promise(r => setTimeout(r, 500)) // gentle pacing
-            const res = await fetch(url, {
-                headers: {
-                    'Accept': 'application/json',
-                    'User-Agent': 'ShippingTracker/1.0 (+https://github.com/shipping-tracker)'
-                }
-            })
-            if (!res.ok) continue
-            const data = await res.json()
-            if (Array.isArray(data) && data[0]) {
-                const coords = { lat: Number(data[0].lat), lon: Number(data[0].lon) }
-                console.log('Geocoded (maps.co)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
-                geocodeCache.set(cacheKey, coords)
-                return coords
-            }
-        } catch (err) {
-            console.error('maps.co geocode error for', searchTerm, ':', err.message)
+            // Silently continue to next variant
         }
     }
 
@@ -551,6 +710,7 @@ async function getVesselStatus(mmsi) {
             country: data.country || null,
             imo: data.imo || null,
             grossTonnage: data.gt || null,
+            eta: data.etaTS ? new Date(data.etaTS * 1000).toISOString() : null,
             lastUpdate: data.ts ? new Date(data.ts * 1000).toISOString() : null,
             source: 'vesselfinder-api'
         }
@@ -563,8 +723,7 @@ async function getVesselStatus(mmsi) {
     }
 }
 
-// Attempt to get live position - uses AIS Stream data if available in cache
-// VesselFinder free tier doesn't provide coordinates
+// Attempt to get live position from cached scraper updates
 function getLivePosition(mmsi) {
     const tracked = trackedVessels.get(mmsi?.toString())
     if (tracked && tracked.latitude && tracked.longitude) {
@@ -573,7 +732,7 @@ function getLivePosition(mmsi) {
             longitude: tracked.longitude,
             speed: tracked.speed,
             heading: tracked.heading || tracked.cog,
-            source: tracked.positionSource || 'ais-stream',
+            source: tracked.positionSource || 'myshiptracking',
             updatedAt: tracked.updatedAt
         }
     }
@@ -588,28 +747,6 @@ function extractMmsiFromText(text) {
 
 function normalizeName(name) {
     return (name || '').toString().toUpperCase().replace(/[^A-Z0-9]/g, '')
-}
-
-function buildBoundingBox(lat, lon, km = 250) {
-    if (!lat || !lon) return null
-    const d = km / 111 // approx degrees per km
-    return [
-        [lat + d, lon - d],
-        [lat - d, lon + d]
-    ]
-}
-
-function startNameHunt(targetName, boundingBoxes, seed) {
-    const norm = normalizeName(targetName)
-    if (!norm) return
-    pendingNameLookups.set(norm, {
-        pendingId: seed?.mmsi,
-        targetName: targetName,
-        seed,
-        boxes: boundingBoxes
-    })
-    ;(boundingBoxes || []).forEach(addBoundingBox)
-    queueSubscriptionUpdate()
 }
 
 // Search for vessel MMSI by name - efficient scraping only (no API keys needed)
@@ -722,6 +859,20 @@ async function searchVesselByName(vesselName) {
         }
     }
 
+    // Fallback: MyShipTracking search page (parses vessel link)
+    for (const term of searchVariants.slice(0, 3)) {
+        const resolved = await resolveMyShipTrackingInfo(null, term)
+        if (resolved?.mmsi) {
+            console.log('Found vessel via MyShipTracking search:', resolved.name || term, resolved.mmsi)
+            return {
+                mmsi: resolved.mmsi,
+                name: resolved.name || term,
+                source: 'myshiptracking',
+                myShipTrackingUrl: resolved.url
+            }
+        }
+    }
+
     console.log('Could not find MMSI for vessel:', cleanName)
     return null
 }
@@ -745,51 +896,10 @@ async function createVesselFromImport(details, rawText = '') {
         }
     }
 
-    // If still no MMSI, we cannot track this vessel with real AIS data
+    // If still no MMSI, we cannot track this vessel with live sources
     if (!mmsi) {
-        console.warn('No MMSI found; starting AIS name hunt:', vesselName)
-
-        const originCoords = await geocodePort(details.origin)
-        const destCoords = await geocodePort(details.destination)
-        const boxes = []
-        const originBox = buildBoundingBox(originCoords?.lat, originCoords?.lon, 250)
-        const destBox = buildBoundingBox(destCoords?.lat, destCoords?.lon, 250)
-        if (originBox) boxes.push(originBox)
-        if (destBox) boxes.push(destBox)
-        if (boxes.length === 0) {
-            // fallback to wide box if we have nothing
-            boxes.push([[-90, -180], [90, 180]])
-        }
-
-        const pendingId = `PENDING-${Date.now()}-${Math.floor(Math.random() * 1000)}`
-        const placeholder = {
-            mmsi: pendingId,
-            name: vesselName,
-            origin: details.origin || null,
-            destination: details.destination || null,
-            voyage: details.voyage || null,
-            voyageNo: details.voyage || null,
-            blNumber: details.blNumber || null,
-            shipper: details.shipper || null,
-            consignee: details.consignee || null,
-            originLat: originCoords?.lat ?? null,
-            originLng: originCoords?.lon ?? null,
-            destLat: destCoords?.lat ?? null,
-            destLng: destCoords?.lon ?? null,
-            route: (originCoords && destCoords) ? calculateRoute(
-                originCoords.lat, originCoords.lon, destCoords.lat, destCoords.lon, details.origin, details.destination
-            ) : null,
-            eta: details.eta || null,
-            searching: true,
-            status: 'Searching AIS by name',
-            importedAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-        }
-
-        trackedVessels.set(pendingId, placeholder)
-        vesselDatabase.push(placeholder)
-        startNameHunt(vesselName, boxes, { ...placeholder })
-        return placeholder
+        console.warn('No MMSI found; cannot start live tracking:', vesselName)
+        return null
     }
 
     // Get coordinates for origin and destination ports + vessel status from VesselFinder
@@ -801,7 +911,7 @@ async function createVesselFromImport(details, rawText = '') {
     console.log('Geocode results:', { origin: details.origin, originCoords, destination: details.destination, destCoords })
     console.log('Vessel status from VesselFinder:', vesselStatus)
 
-    // Check if we have cached position from AIS Stream
+    // Check if we have cached position from previous scraper refresh
     const cachedPosition = getLivePosition(mmsi)
 
     const vessel = {
@@ -811,7 +921,7 @@ async function createVesselFromImport(details, rawText = '') {
         flag: vesselStatus?.country || vesselInfo?.flag || null,
         shipType: vesselStatus?.vesselType || vesselInfo?.type || null,
         destination: details.destination || null,
-        currentDestination: vesselStatus?.currentDestination || null, // Current AIS destination
+        currentDestination: vesselStatus?.currentDestination || null, // Current reported destination
         origin: details.origin || null,
         voyage: details.voyage || null,
         voyageNo: details.voyage || null,
@@ -822,15 +932,16 @@ async function createVesselFromImport(details, rawText = '') {
         originLng: originCoords?.lon ?? null,
         destLat: destCoords?.lat ?? null,
         destLng: destCoords?.lon ?? null,
-        // Live position from AIS Stream cache (VesselFinder API doesn't provide coords)
+        // Live position from scraper cache (VesselFinder API doesn't provide coords)
         latitude: cachedPosition?.latitude ?? null,
         longitude: cachedPosition?.longitude ?? null,
         speed: vesselStatus?.speed ?? cachedPosition?.speed ?? null,
         heading: vesselStatus?.heading ?? cachedPosition?.heading ?? null,
-        positionSource: cachedPosition?.source ?? vesselStatus?.source ?? null,
+        positionSource: cachedPosition?.source ?? null,
         grossTonnage: vesselStatus?.grossTonnage || null,
+        myShipTrackingUrl: vesselInfo?.myShipTrackingUrl || null,
         importedAt: new Date().toISOString(),
-        updatedAt: vesselStatus?.lastUpdate || new Date().toISOString()
+        updatedAt: cachedPosition?.updatedAt || vesselStatus?.lastUpdate || new Date().toISOString()
     }
 
     // Ensure coords if missing (retry geocode) and compute route
@@ -852,7 +963,7 @@ async function createVesselFromImport(details, rawText = '') {
         // Calculate ETA if we have live position
         if (vessel.latitude && vessel.longitude) {
             const etaCalc = estimateArrival(route, vessel.latitude, vessel.longitude, vessel.speed || 12)
-            vessel.eta = etaCalc?.eta || details.eta || null
+            vessel.eta = vesselStatus?.eta || etaCalc?.eta || details.eta || null
             vessel.distanceRemainingNm = etaCalc?.distanceRemaining || null
             vessel.hoursRemaining = etaCalc?.hoursRemaining || null
         } else {
@@ -863,17 +974,43 @@ async function createVesselFromImport(details, rawText = '') {
     }
 
     trackedVessels.set(vessel.mmsi, vessel)
-
-    // Subscribe to Airstream for live AIS updates
-    subscribeToMMSI(vessel.mmsi)
-    console.log('Subscribed to Airstream for vessel:', vessel.name, vessel.mmsi)
-
-    return vessel
+    const refreshed = await refreshPositionForVessel(vessel, { force: true })
+    return refreshed || vessel
 }
 
 // ============================================
 // API ENDPOINTS
 // ============================================
+
+// Test endpoint to add a vessel manually (for testing when Gemini API is rate-limited)
+app.post('/api/test/add-vessel', async (req, res) => {
+    const { mmsi, name, origin, destination, voyage, blNumber } = req.body
+    if (!mmsi || !name) {
+        return res.status(400).json({ error: 'mmsi and name required' })
+    }
+
+    const vessel = {
+        mmsi: mmsi.toString(),
+        name,
+        origin,
+        destination,
+        voyage,
+        blNumber,
+        importedAt: new Date().toISOString()
+    }
+
+    // Add to database
+    const idx = vesselDatabase.findIndex(v => v.mmsi === vessel.mmsi)
+    if (idx >= 0) {
+        vesselDatabase[idx] = { ...vesselDatabase[idx], ...vessel }
+    } else {
+        vesselDatabase.push(vessel)
+    }
+
+    const refreshed = await refreshPositionForVessel(vessel, { force: true })
+    console.log('Test vessel added:', name, mmsi)
+    res.json({ success: true, vessel: refreshed || vessel })
+})
 
 app.post('/api/import/bl', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' })
@@ -903,18 +1040,18 @@ app.post('/api/import/bl', upload.single('file'), async (req, res) => {
             console.error('pdf-parse error:', e.message)
         }
 
-        // Step 2: Use AI to extract structured data
-        if (process.env.GEMINI_API_KEY) {
+        // Step 2: Use AI to extract structured data (Gemini 3 Flash with OpenAI fallback)
+        if (process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY) {
             if (!isScannedPDF && text.length > 50) {
                 console.log('Using AI text extraction...')
                 details = await extractVesselDetailsWithAI(text)
-                extractionMethod = 'ai-gemini'
+                extractionMethod = 'ai-text'
             } else {
                 console.log('Using AI vision extraction...')
-                const visionDetails = await extractVesselDetailsFromPDFImage(dataBuffer)
+                const visionDetails = await extractVesselDetailsFromPDFImage(dataBuffer, text)
                 if (visionDetails && visionDetails.vessel) {
                     details = visionDetails
-                    extractionMethod = 'ai-gemini-vision'
+                    extractionMethod = 'ai-vision'
                     isScannedPDF = false
                 }
             }
@@ -943,7 +1080,7 @@ app.post('/api/import/bl', upload.single('file'), async (req, res) => {
 
         // Add error message if vessel couldn't be created
         if (!vessel && details.vessel) {
-            response.error = `Could not find MMSI for vessel "${details.vessel}". The vessel may not be in global AIS databases. Try adding the 9-digit MMSI number to the Bill of Lading.`
+            response.error = `Could not find MMSI for vessel "${details.vessel}". The vessel may not be in global vessel databases. Try adding the 9-digit MMSI number to the Bill of Lading.`
         } else if (!vessel) {
             response.error = 'Could not extract vessel information from the PDF.'
         }
@@ -980,7 +1117,7 @@ app.get('/api/vessels', async (req, res) => {
         const tb = new Date(b.updatedAt || b.importedAt || 0).getTime()
         return tb - ta
     })
-    res.json({ vessels: sorted.slice(0, 10) })
+    res.json({ vessels: sorted.slice(0, MAX_TRACKED_VESSELS) })
 })
 
 app.get('/api/bottlenecks', (req, res) => {
@@ -1006,11 +1143,12 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
             enriched.vesselType = vesselStatus.vesselType || enriched.shipType
             enriched.imo = vesselStatus.imo || enriched.imo
             enriched.grossTonnage = vesselStatus.grossTonnage || enriched.grossTonnage
+            enriched.eta = vesselStatus.eta || enriched.eta
             enriched.statusSource = 'vesselfinder-api'
             enriched.statusUpdatedAt = vesselStatus.lastUpdate
 
             // Note: VesselFinder free tier doesn't provide coordinates
-            // Coordinates come from AIS Stream WebSocket
+            // Coordinates come from MyShipTracking scraper
             const cachedPosition = getLivePosition(mmsi)
             if (cachedPosition) {
                 enriched.latitude = cachedPosition.latitude
@@ -1024,6 +1162,11 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
             const dbIdx = vesselDatabase.findIndex(v => v.mmsi === mmsi)
             if (dbIdx >= 0) vesselDatabase[dbIdx] = { ...vesselDatabase[dbIdx], ...enriched }
         }
+    }
+
+    const refreshed = await refreshPositionForVessel(enriched, { force: true })
+    if (refreshed) {
+        Object.assign(enriched, refreshed)
     }
 
     if (enriched.latitude && enriched.longitude) {
@@ -1060,8 +1203,8 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
 app.get('/api/health', (req, res) => res.json({
     status: 'ok',
     timestamp: new Date(),
-    aisConnected: aisSocket?.readyState === WebSocket.OPEN,
-    trackedVessels: trackedVessels.size
+    trackedVessels: trackedVessels.size,
+    positionRefreshMs: POSITION_REFRESH_MS
 }))
 
 // Serve static files
@@ -1087,20 +1230,16 @@ wss.on('connection', (ws) => {
             const tb = new Date(b.updatedAt || b.importedAt || 0).getTime()
             return tb - ta
         })
-        ws.send(JSON.stringify({ type: 'vessels', data: sorted.slice(0, 10) }))
-    }, 30000)
+        ws.send(JSON.stringify({ type: 'vessels', data: sorted.slice(0, MAX_TRACKED_VESSELS) }))
+    }, POSITION_REFRESH_MS)
     ws.on('close', () => clearInterval(interval))
 })
 
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`)
-    console.log(`AIS API Key configured: ${!!AIS_API_KEY}`)
     console.log(`Gemini API Key configured: ${!!process.env.GEMINI_API_KEY}`)
-
-    // Start AIS connection if we have API key
-    if (AIS_API_KEY) {
-        ensureAISConnection()
-    }
+    console.log(`Position refresh interval: ${POSITION_REFRESH_MS}ms`)
+    startPositionRefresh()
 })
 
 module.exports = app

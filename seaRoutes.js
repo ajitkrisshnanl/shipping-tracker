@@ -115,6 +115,7 @@ function calculateRoute(originLat, originLng, destLat, destLng, originName, dest
     const destInEurope = destLat > 35 && destLng > -15 && destLng < 35
     const destInUSEast = destLng > -85 && destLng < -65 && destLat > 25 && destLat < 45
     const destInUSWest = destLng < -115 && destLat > 25 && destLat < 50
+    const destInAsia = destLng > 60 && destLng < 145
 
     // India to US East Coast (like Kolkata to Norfolk)
     if (originInIndia && destInUSEast) {

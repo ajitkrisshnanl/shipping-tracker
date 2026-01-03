@@ -10,7 +10,12 @@
     "server": "node server.js",
     "start": "NODE_ENV=production node server.js"
   },
-  "keywords": ["shipping", "vessel", "tracker", "ais"],
+  "keywords": [
+    "shipping",
+    "vessel",
+    "tracker",
+    "ais"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
@@ -21,7 +26,9 @@
     "express": "^5.2.1",
     "leaflet": "^1.9.4",
     "multer": "^2.0.2",
+    "openai": "^6.15.0",
     "pdf-parse": "^1.1.1",
+    "pdf-poppler": "^0.2.3",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-leaflet": "^5.0.0",
