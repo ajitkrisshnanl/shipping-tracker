@@ -2,6 +2,23 @@
  * Vessel Service - Handles API communication and WebSocket connections
  */
 
+const DEFAULT_API_TIMEOUT_MS = 20000
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
+    const controller = new AbortController()
+    const id = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+        return await fetch(url, { ...options, signal: controller.signal })
+    } catch (err) {
+        if (err?.name === 'AbortError') {
+            throw new Error(`Request timeout after ${timeoutMs}ms`)
+        }
+        throw err
+    } finally {
+        clearTimeout(id)
+    }
+}
+
 class VesselService {
     constructor() {
         this.ws = null
@@ -232,7 +249,7 @@ class VesselService {
     }
 
     async sendNotificationNow(id) {
-        const response = await fetch(`/api/notifications/${encodeURIComponent(id)}/test`, {
+        const response = await fetchWithTimeout(`/api/notifications/${encodeURIComponent(id)}/test`, {
             method: 'POST'
         })
         if (!response.ok) {

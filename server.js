@@ -70,15 +70,56 @@ const SMTP_PASS = process.env.SMTP_PASS || null
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || null
 const SMTP_SECURE = (process.env.SMTP_SECURE || '').toLowerCase() === 'true'
 const EMAIL_ENABLED = !!(SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM)
+const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 15000)
+const SMTP_SEND_TIMEOUT_MS = Number(process.env.SMTP_SEND_TIMEOUT_MS || 15000)
 
 const mailTransporter = EMAIL_ENABLED
     ? nodemailer.createTransport({
         host: SMTP_HOST,
         port: SMTP_PORT,
         secure: SMTP_SECURE,
-        auth: { user: SMTP_USER, pass: SMTP_PASS }
+        auth: { user: SMTP_USER, pass: SMTP_PASS },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 20000
     })
     : null
+
+function withTimeout(promise, timeoutMs, label) {
+    let timeoutId = null
+    const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`${label} timeout`)), timeoutMs)
+    })
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId)
+    })
+}
+
+function formatEmailError(err) {
+    if (!err) return 'Unknown email error'
+    const parts = []
+    if (err.code) parts.push(`code=${err.code}`)
+    if (err.responseCode) parts.push(`smtp=${err.responseCode}`)
+    if (err.command) parts.push(`command=${err.command}`)
+    if (err.response) parts.push(`response=${err.response}`)
+    const message = err.message || 'SMTP error'
+    return parts.length ? `${message} (${parts.join(', ')})` : message
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
+    const controller = new AbortController()
+    const id = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+        return await fetch(url, { ...options, signal: controller.signal })
+    } catch (err) {
+        if (err?.name === 'AbortError') {
+            throw new Error(`Request timeout after ${timeoutMs}ms`)
+        }
+        throw err
+    } finally {
+        clearTimeout(id)
+    }
+}
 
 function getPositionCacheKey(mmsi, name) {
     if (mmsi) return mmsi.toString()
@@ -213,12 +254,22 @@ async function sendVesselEmailUpdate(subscription) {
 
     const text = bodyLines.join('\n')
 
-    await mailTransporter.sendMail({
-        from: SMTP_FROM,
-        to: subscription.email,
-        subject,
-        text
-    })
+    try {
+        await withTimeout(
+            mailTransporter.sendMail({
+                from: SMTP_FROM,
+                to: subscription.email,
+                subject,
+                text
+            }),
+            SMTP_SEND_TIMEOUT_MS,
+            'SMTP send'
+        )
+    } catch (err) {
+        const formatted = formatEmailError(err)
+        console.error('Email send failed:', formatted)
+        throw new Error(formatted)
+    }
 }
 
 async function runNotificationsTick() {
@@ -268,7 +319,7 @@ async function resolveMyShipTrackingInfo(mmsi, name) {
 
     try {
         const searchUrl = `https://www.myshiptracking.com/vessels?name=${encodeURIComponent(term)}`
-        const res = await fetch(searchUrl, {
+        const res = await fetchWithTimeout(searchUrl, {
             headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
         })
         if (!res.ok) return null
@@ -322,7 +373,7 @@ async function fetchMyShipTrackingPositionByMmsi(mmsi) {
     if (!mmsi) return null
     try {
         const url = `https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi=${encodeURIComponent(mmsi)}`
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
             headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
         })
         if (!res.ok) return null
@@ -380,7 +431,7 @@ async function fetchMyShipTrackingRoute(mmsi, originName, destName) {
     if (!mmsi) return null
     try {
         const portsUrl = `https://www.myshiptracking.com/requests/calc_ports.php?mmsi=${encodeURIComponent(mmsi)}`
-        const portsRes = await fetch(portsUrl, {
+        const portsRes = await fetchWithTimeout(portsUrl, {
             headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
         })
         if (!portsRes.ok) return null
@@ -390,7 +441,7 @@ async function fetchMyShipTrackingRoute(mmsi, originName, destName) {
 
         const routeId = routes[0].id
         const routeUrl = `https://www.myshiptracking.com/requests/calc_routes.php?route=${encodeURIComponent(routeId)}`
-        const routeRes = await fetch(routeUrl, {
+        const routeRes = await fetchWithTimeout(routeUrl, {
             headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
         })
         if (!routeRes.ok) return null
@@ -434,7 +485,7 @@ async function fetchMyShipTrackingPosition(vessel) {
     if (!url) return null
 
     try {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
             headers: { ...SCRAPE_HEADERS, 'Referer': 'https://www.myshiptracking.com/' }
         })
         if (!res.ok) return null
@@ -847,7 +898,7 @@ async function geocodePort(portName) {
         for (const searchTerm of variants.slice(0, 3)) {
             try {
                 const url = `https://geocode.maps.co/search?q=${encodeURIComponent(searchTerm)}&api_key=${GEOCODE_API_KEY}&limit=1`
-                const res = await fetch(url, {
+                const res = await fetchWithTimeout(url, {
                     headers: { 'Accept': 'application/json' }
                 })
 
@@ -872,7 +923,7 @@ async function geocodePort(portName) {
     for (const searchTerm of variants.slice(0, 4)) {
         try {
             const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(searchTerm)}&count=1&language=en&format=json`
-            const res = await fetch(url, {
+            const res = await fetchWithTimeout(url, {
                 headers: { 'Accept': 'application/json' }
             })
             if (res.ok) {
@@ -897,7 +948,7 @@ async function geocodePort(portName) {
         try {
             await new Promise(r => setTimeout(r, 1100)) // Rate limit
 
-            const res = await fetch(url, {
+            const res = await fetchWithTimeout(url, {
                 headers: {
                     'User-Agent': 'ShippingTracker/1.0 (https://github.com/shipping-tracker)',
                     'Accept': 'application/json',
@@ -988,7 +1039,7 @@ async function getMarineConditions(lat, lon) {
     if (!lat || !lon) return null
     const url = `https://marine-api.open-meteo.com/v1/marine?latitude=${lat}&longitude=${lon}&current=wave_height,wave_direction,wind_speed_10m,wind_direction_10m&timezone=UTC`
     try {
-        const res = await fetch(url)
+        const res = await fetchWithTimeout(url)
         if (!res.ok) throw new Error(`marine ${res.status}`)
         const data = await res.json()
         return data.current || null
@@ -1004,7 +1055,7 @@ async function getVesselStatus(mmsi) {
     if (!mmsi) return null
     try {
         const url = `https://www.vesselfinder.com/api/pub/click/${mmsi}`
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'application/json',
@@ -1077,7 +1128,7 @@ async function searchVesselByName(vesselName) {
         try {
             // Step 1: Search page
             const searchUrl = `https://www.vesselfinder.com/vessels?name=${encodeURIComponent(term)}`
-            const res = await fetch(searchUrl, {
+            const res = await fetchWithTimeout(searchUrl, {
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'text/html' }
             })
             if (!res.ok) return null
@@ -1090,7 +1141,7 @@ async function searchVesselByName(vesselName) {
 
             // Step 2: Get MMSI from detail page
             const detailUrl = 'https://www.vesselfinder.com' + detailMatch[1]
-            const detailRes = await fetch(detailUrl, {
+            const detailRes = await fetchWithTimeout(detailUrl, {
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'text/html' }
             })
             if (!detailRes.ok) return null
@@ -1156,7 +1207,7 @@ async function searchVesselByName(vesselName) {
     for (const term of searchVariants.slice(0, 3)) {
         try {
             const url = `https://www.myshiptracking.com/requests/autocomplete-ede42.php?term=${encodeURIComponent(term)}`
-            const res = await fetch(url, {
+            const res = await fetchWithTimeout(url, {
                 headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json', 'Referer': 'https://www.myshiptracking.com/' }
             })
             if (res.ok) {
@@ -1605,6 +1656,9 @@ app.post('/api/notifications/:id/test', async (req, res) => {
         saveSubscriptions()
         res.json({ ok: true, subscription: sub })
     } catch (err) {
+        sub.lastError = err.message
+        sub.updatedAt = new Date().toISOString()
+        saveSubscriptions()
         res.status(500).json({ error: err.message })
     }
 })
@@ -1649,6 +1703,11 @@ server.listen(PORT, () => {
     console.log(`Gemini API Key configured: ${!!process.env.GEMINI_API_KEY}`)
     console.log(`Position refresh interval: ${POSITION_REFRESH_MS}ms`)
     console.log(`Email notifications enabled: ${EMAIL_ENABLED}`)
+    if (EMAIL_ENABLED && mailTransporter) {
+        withTimeout(mailTransporter.verify(), SMTP_SEND_TIMEOUT_MS, 'SMTP verify')
+            .then(() => console.log('SMTP connection verified'))
+            .catch((err) => console.error('SMTP verify failed:', formatEmailError(err)))
+    }
     startPositionRefresh()
     startNotificationsScheduler()
 })
