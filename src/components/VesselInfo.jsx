@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { vesselService } from '../services/vesselService'
 
 // Calendar icon
@@ -15,6 +15,13 @@ const CloseIcon = () => (
     </svg>
 )
 
+// Chevron icon for expand/collapse
+const ChevronIcon = ({ direction }) => (
+    <svg viewBox="0 0 24 24" fill="currentColor" style={{ transform: direction === 'up' ? 'rotate(180deg)' : 'none' }}>
+        <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
+    </svg>
+)
+
 function VesselInfo({ vessel, onClose }) {
     if (!vessel) return null
 
@@ -27,6 +34,11 @@ function VesselInfo({ vessel, onClose }) {
     const [notificationSuccess, setNotificationSuccess] = useState(null)
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [sendingId, setSendingId] = useState(null)
+    const [isMinimized, setIsMinimized] = useState(() => {
+        if (typeof window === 'undefined') return false
+        return window.matchMedia('(max-width: 768px)').matches
+    })
+    const touchStartY = useRef(null)
 
     // Format ETA
     const formatETA = (date) => {
@@ -51,6 +63,35 @@ function VesselInfo({ vessel, onClose }) {
                 })
         }
         return () => { active = false }
+    }, [vessel?.mmsi])
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return
+        const media = window.matchMedia('(max-width: 768px)')
+        const handleChange = (event) => {
+            if (!event.matches) {
+                setIsMinimized(false)
+            }
+        }
+        if (media.addEventListener) {
+            media.addEventListener('change', handleChange)
+        } else {
+            media.addListener(handleChange)
+        }
+        return () => {
+            if (media.removeEventListener) {
+                media.removeEventListener('change', handleChange)
+            } else {
+                media.removeListener(handleChange)
+            }
+        }
+    }, [])
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return
+        if (window.matchMedia('(max-width: 768px)').matches) {
+            setIsMinimized(true)
+        }
     }, [vessel?.mmsi])
 
     const handleCreateNotification = async (event) => {
@@ -101,14 +142,61 @@ function VesselInfo({ vessel, onClose }) {
         }
     }
 
+    const handleHandleTouchStart = (event) => {
+        touchStartY.current = event.touches?.[0]?.clientY ?? null
+    }
+
+    const handleHandleTouchEnd = (event) => {
+        if (touchStartY.current === null) return
+        const endY = event.changedTouches?.[0]?.clientY ?? touchStartY.current
+        const delta = touchStartY.current - endY
+        const threshold = 30
+        if (Math.abs(delta) >= threshold) {
+            setIsMinimized(delta < 0)
+        }
+        touchStartY.current = null
+    }
+
     return (
-        <div className="info-panel">
+        <div className={`info-panel ${isMinimized ? 'minimized' : ''}`}>
+            {/* Drag handle for mobile - tap to expand/collapse */}
+            <div
+                className="info-panel-handle"
+                onClick={() => setIsMinimized(!isMinimized)}
+                onTouchStart={handleHandleTouchStart}
+                onTouchEnd={handleHandleTouchEnd}
+            >
+                <div className="handle-bar"></div>
+            </div>
+
             <div className="info-panel-header">
                 <h3 className="info-panel-title">{vessel.name || 'Unknown Vessel'}</h3>
-                <button className="close-btn" onClick={onClose}>
-                    <CloseIcon />
-                </button>
+                <div className="header-actions">
+                    {/* Minimize/Expand button for mobile */}
+                    <button
+                        className="minimize-btn"
+                        onClick={() => setIsMinimized(!isMinimized)}
+                        aria-label={isMinimized ? 'Expand' : 'Minimize'}
+                    >
+                        <ChevronIcon direction={isMinimized ? 'up' : 'down'} />
+                    </button>
+                    <button className="close-btn" onClick={onClose} aria-label="Close">
+                        <CloseIcon />
+                    </button>
+                </div>
             </div>
+
+            {/* Summary shown when minimized */}
+            {isMinimized && (
+                <div className="info-panel-summary" onClick={() => setIsMinimized(false)}>
+                    <span className="summary-route">
+                        {vessel.origin || 'Origin'} → {vessel.destination || 'Destination'}
+                    </span>
+                    <span className={`summary-status ${isDelayed ? 'delayed' : 'on-time'}`}>
+                        {isDelayed ? `+${vessel.delayMinutes}m` : 'On Time'}
+                    </span>
+                </div>
+            )}
 
             <div className="info-panel-content">
                 {/* Vessel Details */}

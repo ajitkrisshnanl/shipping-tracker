@@ -55,11 +55,11 @@ function ImportPanel({ onClose, onImportComplete }) {
     const hasData = extractedData && extractedData.vessel
 
     return (
-        <div className="import-overlay">
-            <div className="import-panel">
+        <div className="import-overlay" onClick={onClose}>
+            <div className="import-panel" onClick={(event) => event.stopPropagation()}>
                 <div className="import-header">
                     <h3>Import Bill of Lading / Invoice</h3>
-                    <button className="close-btn" onClick={onClose}>
+                    <button className="close-btn" onClick={onClose} aria-label="Close">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                         </svg>

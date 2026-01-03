@@ -23,6 +23,27 @@ function App() {
     const [searchQuery, setSearchQuery] = useState('')
     const [isLoading, setIsLoading] = useState(false)
     const [showImport, setShowImport] = useState(false)
+    const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return
+        const media = window.matchMedia('(max-width: 768px)')
+        const handleChange = (event) => {
+            if (!event.matches) setIsSidebarCollapsed(false)
+        }
+        if (media.addEventListener) {
+            media.addEventListener('change', handleChange)
+        } else {
+            media.addListener(handleChange)
+        }
+        return () => {
+            if (media.removeEventListener) {
+                media.removeEventListener('change', handleChange)
+            } else {
+                media.removeListener(handleChange)
+            }
+        }
+    }, [])
 
     // Initialize connection
     useEffect(() => {
@@ -108,7 +129,7 @@ function App() {
     }, [])
 
     return (
-        <div className="app-container">
+        <div className={`app-container ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
             {/* Sidebar */}
             <aside className="sidebar">
                 {/* Header */}
@@ -119,78 +140,91 @@ function App() {
                         </div>
                         <span className="logo-text">Vessel Tracker</span>
                     </div>
+                    <button
+                        className="sidebar-toggle"
+                        onClick={() => setIsSidebarCollapsed(prev => !prev)}
+                        aria-label={isSidebarCollapsed ? 'Show panel' : 'Hide panel'}
+                        aria-pressed={isSidebarCollapsed}
+                        type="button"
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                        </svg>
+                    </button>
                     <div className="connection-status">
                         <div className={`status-dot ${!isConnected ? 'disconnected' : ''}`}></div>
                         <span>{isConnected ? 'Live' : 'Offline'}</span>
                     </div>
                 </header>
 
-                {/* Search */}
-                <SearchPanel
-                    query={searchQuery}
-                    onQueryChange={setSearchQuery}
-                    onSearch={handleSearch}
-                    isLoading={isLoading}
-                />
+                <div className="sidebar-body">
+                    {/* Search */}
+                    <SearchPanel
+                        query={searchQuery}
+                        onQueryChange={setSearchQuery}
+                        onSearch={handleSearch}
+                        isLoading={isLoading}
+                    />
 
-                {/* Import Button */}
-                <div style={{ padding: '0 20px 10px' }}>
-                    <button
-                        onClick={() => setShowImport(true)}
-                        style={{
-                            width: '100%',
-                            padding: '10px',
-                            background: 'var(--bg-tertiary)',
-                            border: '1px dashed var(--border-accent)',
-                            borderRadius: '8px',
-                            color: 'var(--accent-primary)',
-                            cursor: 'pointer',
-                            fontSize: '13px',
-                            fontWeight: '500',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '8px'
-                        }}
-                    >
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                            <polyline points="17 8 12 3 7 8" />
-                            <line x1="12" y1="3" x2="12" y2="15" />
-                        </svg>
-                        Import Invoice/BL
-                    </button>
-                </div>
+                    {/* Import Button */}
+                    <div className="import-cta" style={{ padding: '0 20px 10px' }}>
+                        <button
+                            onClick={() => setShowImport(true)}
+                            style={{
+                                width: '100%',
+                                padding: '10px',
+                                background: 'var(--bg-tertiary)',
+                                border: '1px dashed var(--border-accent)',
+                                borderRadius: '8px',
+                                color: 'var(--accent-primary)',
+                                cursor: 'pointer',
+                                fontSize: '13px',
+                                fontWeight: '500',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '8px'
+                            }}
+                        >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                <polyline points="17 8 12 3 7 8" />
+                                <line x1="12" y1="3" x2="12" y2="15" />
+                            </svg>
+                            Import Invoice/BL
+                        </button>
+                    </div>
 
-                {/* Vessel List */}
-                <div className="vessel-list">
-                    <div className="section-title">Tracked Vessels</div>
-                    {vessels.length === 0 ? (
-                        <div className="empty-state">
-                            <div className="empty-state-icon">
-                                <ShipIcon />
+                    {/* Vessel List */}
+                    <div className="vessel-list">
+                        <div className="section-title">Tracked Vessels</div>
+                        {vessels.length === 0 ? (
+                            <div className="empty-state">
+                                <div className="empty-state-icon">
+                                    <ShipIcon />
+                                </div>
+                                <div className="empty-state-title">No vessels tracked</div>
+                                <div className="empty-state-text">
+                                    Search for a vessel or import a BL
+                                </div>
                             </div>
-                            <div className="empty-state-title">No vessels tracked</div>
-                            <div className="empty-state-text">
-                                Search for a vessel or import a BL
-                            </div>
-                        </div>
-                    ) : (
-                        vessels.map(vessel => (
-                            <VesselCard
-                                key={vessel.mmsi}
-                                vessel={vessel}
-                                isActive={selectedVessel?.mmsi === vessel.mmsi}
-                                onClick={() => handleVesselSelect(vessel)}
-                            />
-                        ))
+                        ) : (
+                            vessels.map(vessel => (
+                                <VesselCard
+                                    key={vessel.mmsi}
+                                    vessel={vessel}
+                                    isActive={selectedVessel?.mmsi === vessel.mmsi}
+                                    onClick={() => handleVesselSelect(vessel)}
+                                />
+                            ))
+                        )}
+                    </div>
+
+                    {/* Bottleneck Alerts */}
+                    {bottlenecks.length > 0 && (
+                        <BottleneckAlerts alerts={bottlenecks} />
                     )}
                 </div>
-
-                {/* Bottleneck Alerts */}
-                {bottlenecks.length > 0 && (
-                    <BottleneckAlerts alerts={bottlenecks} />
-                )}
             </aside>
 
             {/* Map */}
