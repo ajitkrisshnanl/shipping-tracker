@@ -197,6 +197,39 @@ class VesselService {
         const data = await response.json()
         return this.transformVesselData(data.vessel || {})
     }
+
+    async getNotifications(mmsi) {
+        const response = await fetch(`/api/notifications?mmsi=${encodeURIComponent(mmsi)}`)
+        if (!response.ok) throw new Error('Failed to fetch notifications')
+        const data = await response.json()
+        return data.subscriptions || []
+    }
+
+    async createNotification({ mmsi, email, cadenceHours }) {
+        const response = await fetch('/api/notifications', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mmsi, email, cadenceHours })
+        })
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}))
+            throw new Error(err.error || 'Failed to create notification')
+        }
+        const data = await response.json()
+        return data.subscription
+    }
+
+    async cancelNotification(id) {
+        const response = await fetch(`/api/notifications/${encodeURIComponent(id)}/cancel`, {
+            method: 'POST'
+        })
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}))
+            throw new Error(err.error || 'Failed to cancel notification')
+        }
+        const data = await response.json()
+        return data.subscription
+    }
 }
 
 export const vesselService = new VesselService()

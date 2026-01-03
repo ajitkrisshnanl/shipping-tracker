@@ -3,6 +3,7 @@ dist/
 .vercel
 .env
 api.env
+subscriptions.json
 *.log
 .DS_Store
 venv/

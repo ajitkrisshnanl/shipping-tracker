@@ -1,3 +1,6 @@
+import { useEffect, useState } from 'react'
+import { vesselService } from '../services/vesselService'
+
 // Calendar icon
 const CalendarIcon = () => (
     <svg viewBox="0 0 24 24" fill="currentColor">
@@ -17,6 +20,12 @@ function VesselInfo({ vessel, onClose }) {
 
     const isDelayed = vessel.delayMinutes > 0
     const etaDate = vessel.eta ? new Date(vessel.eta) : null
+    const [email, setEmail] = useState('')
+    const [cadenceHours, setCadenceHours] = useState(24)
+    const [subscriptions, setSubscriptions] = useState([])
+    const [notificationError, setNotificationError] = useState(null)
+    const [notificationSuccess, setNotificationSuccess] = useState(null)
+    const [isSubmitting, setIsSubmitting] = useState(false)
 
     // Format ETA
     const formatETA = (date) => {
@@ -27,6 +36,54 @@ function VesselInfo({ vessel, onClose }) {
             day: 'numeric',
             year: 'numeric'
         })
+    }
+
+    useEffect(() => {
+        let active = true
+        if (vessel?.mmsi) {
+            vesselService.getNotifications(vessel.mmsi)
+                .then((list) => {
+                    if (active) setSubscriptions(list)
+                })
+                .catch(() => {
+                    if (active) setSubscriptions([])
+                })
+        }
+        return () => { active = false }
+    }, [vessel?.mmsi])
+
+    const handleCreateNotification = async (event) => {
+        event.preventDefault()
+        setNotificationError(null)
+        setNotificationSuccess(null)
+        if (!email || !vessel?.mmsi) return
+        setIsSubmitting(true)
+        try {
+            const sub = await vesselService.createNotification({
+                mmsi: vessel.mmsi,
+                email,
+                cadenceHours
+            })
+            setSubscriptions(prev => [...prev, sub])
+            setNotificationSuccess('Email updates scheduled.')
+            setEmail('')
+        } catch (err) {
+            setNotificationError(err.message)
+        } finally {
+            setIsSubmitting(false)
+        }
+    }
+
+    const handleCancelNotification = async (id) => {
+        setNotificationError(null)
+        setNotificationSuccess(null)
+        try {
+            const updated = await vesselService.cancelNotification(id)
+            setSubscriptions(prev => prev.map(s => s.id === updated.id ? updated : s))
+            setNotificationSuccess('Email updates stopped.')
+        } catch (err) {
+            setNotificationError(err.message)
+        }
     }
 
     return (
@@ -169,6 +226,68 @@ function VesselInfo({ vessel, onClose }) {
                         </div>
                     </div>
                 )}
+
+                {/* Email Updates */}
+                <div className="info-section">
+                    <div className="info-section-title">Email Updates</div>
+                    <form onSubmit={handleCreateNotification} style={{ display: 'grid', gap: 8 }}>
+                        <input
+                            type="email"
+                            className="search-input"
+                            placeholder="you@example.com"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            required
+                        />
+                        <label className="info-row" style={{ justifyContent: 'space-between' }}>
+                            <span className="info-label">Cadence (hours)</span>
+                            <input
+                                type="number"
+                                min="1"
+                                max="168"
+                                value={cadenceHours}
+                                onChange={(e) => setCadenceHours(Number(e.target.value))}
+                                style={{
+                                    width: 80,
+                                    textAlign: 'right',
+                                    background: 'var(--bg-tertiary)',
+                                    border: '1px solid var(--border-subtle)',
+                                    color: 'var(--text-primary)',
+                                    borderRadius: 6,
+                                    padding: '4px 6px'
+                                }}
+                            />
+                        </label>
+                        <button className="primary-btn" type="submit" disabled={isSubmitting || !email}>
+                            {isSubmitting ? 'Scheduling...' : 'Start Email Updates'}
+                        </button>
+                    </form>
+                    {notificationError && (
+                        <div className="error-message" style={{ marginTop: 8 }}>{notificationError}</div>
+                    )}
+                    {notificationSuccess && (
+                        <div className="success-message" style={{ marginTop: 8 }}>{notificationSuccess}</div>
+                    )}
+
+                    {subscriptions.filter(s => s.active).length > 0 && (
+                        <div style={{ marginTop: 12, display: 'grid', gap: 6 }}>
+                            {subscriptions.filter(s => s.active).map(sub => (
+                                <div key={sub.id} className="info-row" style={{ alignItems: 'center' }}>
+                                    <span className="info-label">{sub.email}</span>
+                                    <span className="info-value">{sub.cadenceHours}h</span>
+                                    <button
+                                        type="button"
+                                        className="secondary-btn"
+                                        onClick={() => handleCancelNotification(sub.id)}
+                                        style={{ marginLeft: 8 }}
+                                    >
+                                        Stop
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
             </div>
         </div>
     )

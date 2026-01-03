@@ -14,6 +14,7 @@ const multer = require('multer')
 const pdfParse = require('pdf-parse')
 const { GoogleGenerativeAI } = require('@google/generative-ai')
 const OpenAI = require('openai')
+const nodemailer = require('nodemailer')
 const { getBottlenecks, checkBottleneckProximity } = require('./bottlenecks')
 const { calculateRoute, estimateArrival } = require('./seaRoutes')
 
@@ -54,10 +55,30 @@ const POSITION_CACHE_TTL_MS = Number(process.env.POSITION_CACHE_TTL_MS || 25000)
 const MAX_TRACKED_VESSELS = Number(process.env.MAX_TRACKED_VESSELS || 10)
 let positionRefreshTimer = null
 let positionRefreshInFlight = false
+const SUBSCRIPTIONS_FILE = path.join(__dirname, 'subscriptions.json')
+let subscriptions = []
+let notificationsTimer = null
 const SCRAPE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept': 'text/html'
 }
+
+const SMTP_HOST = process.env.SMTP_HOST || null
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587)
+const SMTP_USER = process.env.SMTP_USER || null
+const SMTP_PASS = process.env.SMTP_PASS || null
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || null
+const SMTP_SECURE = (process.env.SMTP_SECURE || '').toLowerCase() === 'true'
+const EMAIL_ENABLED = !!(SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM)
+
+const mailTransporter = EMAIL_ENABLED
+    ? nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: SMTP_SECURE,
+        auth: { user: SMTP_USER, pass: SMTP_PASS }
+    })
+    : null
 
 function getPositionCacheKey(mmsi, name) {
     if (mmsi) return mmsi.toString()
@@ -79,6 +100,150 @@ function getCachedPosition(key) {
 function setCachedPosition(key, data) {
     if (!key || !data) return
     positionCache.set(key, { data, timestamp: Date.now() })
+}
+
+function loadSubscriptions() {
+    try {
+        const fs = require('fs')
+        if (!fs.existsSync(SUBSCRIPTIONS_FILE)) {
+            subscriptions = []
+            return
+        }
+        const raw = fs.readFileSync(SUBSCRIPTIONS_FILE, 'utf8')
+        const data = JSON.parse(raw)
+        subscriptions = Array.isArray(data) ? data : []
+    } catch (err) {
+        console.error('Failed to load subscriptions:', err.message)
+        subscriptions = []
+    }
+}
+
+function saveSubscriptions() {
+    try {
+        const fs = require('fs')
+        fs.writeFileSync(SUBSCRIPTIONS_FILE, JSON.stringify(subscriptions, null, 2))
+    } catch (err) {
+        console.error('Failed to save subscriptions:', err.message)
+    }
+}
+
+function normalizeCadenceHours(input) {
+    const hours = Number(input)
+    if (!Number.isFinite(hours) || hours <= 0) return 24
+    return Math.min(Math.max(hours, 1), 168)
+}
+
+function formatPositionLine(vessel) {
+    if (!vessel?.latitude || !vessel?.longitude) return 'Current Position: unavailable'
+    return `Current Position: ${vessel.latitude.toFixed(4)}, ${vessel.longitude.toFixed(4)}`
+}
+
+function formatWeatherLine(weather) {
+    if (!weather) return 'Weather: unavailable'
+    const wind = `${(weather.wind_speed_10m ?? 0).toFixed(1)} m/s @ ${weather.wind_direction_10m ?? 0}°`
+    const wave = weather.wave_height ? `${weather.wave_height.toFixed(2)} m` : 'N/A'
+    return `Weather: wind ${wind}, wave height ${wave}`
+}
+
+function buildWarningLines(vessel, weather) {
+    const warnings = []
+    if (vessel?.bottleneckWarning) {
+        warnings.push(`Congestion: ${vessel.bottleneckWarning.zone} (+${vessel.bottleneckWarning.delayMinutes} min)`)
+    }
+    if (weather?.wind_speed_10m && weather.wind_speed_10m >= 15) {
+        warnings.push('Weather: high wind conditions')
+    }
+    if (weather?.wave_height && weather.wave_height >= 3) {
+        warnings.push('Weather: high wave height')
+    }
+    return warnings
+}
+
+async function sendVesselEmailUpdate(subscription) {
+    if (!EMAIL_ENABLED || !mailTransporter) {
+        throw new Error('Email service not configured')
+    }
+
+    const mmsi = subscription.mmsi
+    let vessel = trackedVessels.get(mmsi) || vesselDatabase.find(v => v.mmsi === mmsi)
+    if (!vessel) {
+        vessel = { mmsi }
+    }
+
+    const refreshed = await refreshPositionForVessel(vessel, { force: true })
+    const liveVessel = refreshed || vessel
+    await ensurePortCoordinates(liveVessel)
+    await ensureRoute(liveVessel)
+
+    if (liveVessel.route && liveVessel.route.length >= 2 && liveVessel.latitude && liveVessel.longitude) {
+        const etaCalc = estimateArrival(liveVessel.route, liveVessel.latitude, liveVessel.longitude, liveVessel.speed || 12)
+        liveVessel.eta = etaCalc?.eta || liveVessel.eta
+        liveVessel.distanceRemainingNm = etaCalc?.distanceRemaining || liveVessel.distanceRemainingNm || null
+        liveVessel.hoursRemaining = etaCalc?.hoursRemaining || liveVessel.hoursRemaining || null
+    }
+
+    let weather = null
+    if (liveVessel.latitude && liveVessel.longitude) {
+        weather = await getMarineConditions(liveVessel.latitude, liveVessel.longitude)
+        liveVessel.weather = weather
+    }
+
+    if (liveVessel.latitude && liveVessel.longitude) {
+        liveVessel.bottleneckWarning = checkBottleneckProximity(liveVessel.latitude, liveVessel.longitude)
+    }
+
+    const etaLine = liveVessel.eta
+        ? `ETA (Port of Discharge): ${new Date(liveVessel.eta).toUTCString()}`
+        : 'ETA (Port of Discharge): unavailable'
+    const warnings = buildWarningLines(liveVessel, weather)
+
+    const subject = `Vessel Update: ${liveVessel.name || liveVessel.mmsi}`
+    const bodyLines = [
+        `Vessel: ${liveVessel.name || 'Unknown'} (${liveVessel.mmsi || 'N/A'})`,
+        `Port of Loading: ${liveVessel.origin || 'N/A'}`,
+        `Port of Discharge: ${liveVessel.destination || 'N/A'}`,
+        formatPositionLine(liveVessel),
+        etaLine,
+        formatWeatherLine(weather)
+    ]
+
+    if (warnings.length) {
+        bodyLines.push('', 'Warnings:', ...warnings.map(w => `- ${w}`))
+    }
+
+    const text = bodyLines.join('\n')
+
+    await mailTransporter.sendMail({
+        from: SMTP_FROM,
+        to: subscription.email,
+        subject,
+        text
+    })
+}
+
+async function runNotificationsTick() {
+    if (!subscriptions.length) return
+    const now = Date.now()
+
+    for (const sub of subscriptions) {
+        if (!sub.active) continue
+        if (!sub.nextRun || sub.nextRun > now) continue
+        try {
+            await sendVesselEmailUpdate(sub)
+            sub.lastSentAt = new Date().toISOString()
+            sub.nextRun = Date.now() + sub.cadenceHours * 60 * 60 * 1000
+        } catch (err) {
+            sub.lastError = err.message
+        }
+    }
+    saveSubscriptions()
+}
+
+function startNotificationsScheduler() {
+    if (notificationsTimer) return
+    loadSubscriptions()
+    runNotificationsTick()
+    notificationsTimer = setInterval(runNotificationsTick, 60000)
 }
 
 function getMyShipTrackingCachedUrl(mmsi, name) {
@@ -1377,6 +1542,54 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
     res.json({ vessel: enriched })
 })
 
+app.get('/api/notifications', (req, res) => {
+    const mmsi = req.query.mmsi?.toString()
+    const email = req.query.email?.toString()
+    let list = subscriptions
+    if (mmsi) {
+        list = list.filter(s => s.mmsi === mmsi)
+    }
+    if (email) {
+        list = list.filter(s => s.email === email)
+    }
+    res.json({ subscriptions: list })
+})
+
+app.post('/api/notifications', async (req, res) => {
+    if (!EMAIL_ENABLED) {
+        return res.status(400).json({ error: 'Email service not configured' })
+    }
+    const { mmsi, email, cadenceHours } = req.body || {}
+    if (!mmsi || !email) {
+        return res.status(400).json({ error: 'mmsi and email required' })
+    }
+    const cadence = normalizeCadenceHours(cadenceHours || 24)
+    const id = `sub_${Date.now()}_${Math.floor(Math.random() * 1000)}`
+    const entry = {
+        id,
+        mmsi: mmsi.toString(),
+        email: email.toString().trim().toLowerCase(),
+        cadenceHours: cadence,
+        active: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        nextRun: Date.now() + cadence * 60 * 60 * 1000
+    }
+    subscriptions.push(entry)
+    saveSubscriptions()
+    res.json({ subscription: entry })
+})
+
+app.post('/api/notifications/:id/cancel', (req, res) => {
+    const id = req.params.id?.toString()
+    const sub = subscriptions.find(s => s.id === id)
+    if (!sub) return res.status(404).json({ error: 'not found' })
+    sub.active = false
+    sub.updatedAt = new Date().toISOString()
+    saveSubscriptions()
+    res.json({ subscription: sub })
+})
+
 app.get('/api/health', (req, res) => res.json({
     status: 'ok',
     timestamp: new Date(),
@@ -1416,7 +1629,9 @@ server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`)
     console.log(`Gemini API Key configured: ${!!process.env.GEMINI_API_KEY}`)
     console.log(`Position refresh interval: ${POSITION_REFRESH_MS}ms`)
+    console.log(`Email notifications enabled: ${EMAIL_ENABLED}`)
     startPositionRefresh()
+    startNotificationsScheduler()
 })
 
 module.exports = app
