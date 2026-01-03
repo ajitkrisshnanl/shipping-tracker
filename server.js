@@ -559,27 +559,52 @@ async function geocodePort(portName) {
     console.log('Geocoding port:', portName, '- trying variants:', variants.slice(0, 3).join(', '))
 
     // geocode.maps.co - primary (with API key)
-    for (const searchTerm of variants.slice(0, 3)) {
+    if (GEOCODE_API_KEY) {
+        for (const searchTerm of variants.slice(0, 3)) {
+            try {
+                const url = `https://geocode.maps.co/search?q=${encodeURIComponent(searchTerm)}&api_key=${GEOCODE_API_KEY}&limit=1`
+                const res = await fetch(url, {
+                    headers: { 'Accept': 'application/json' }
+                })
+
+                if (res.ok) {
+                    const data = await res.json()
+                    if (Array.isArray(data) && data[0]) {
+                        const coords = { lat: Number(data[0].lat), lon: Number(data[0].lon) }
+                        console.log('Geocoded (maps.co)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
+                        geocodeCache.set(cacheKey, coords)
+                        return coords
+                    }
+                }
+            } catch (err) {
+                console.error('maps.co geocode error for', searchTerm, ':', err.message)
+            }
+            // Rate limit - 1 request per second for free tier
+            await new Promise(r => setTimeout(r, 1000))
+        }
+    }
+
+    // Open-Meteo geocoding fallback (no API key)
+    for (const searchTerm of variants.slice(0, 4)) {
         try {
-            const url = `https://geocode.maps.co/search?q=${encodeURIComponent(searchTerm)}&api_key=${GEOCODE_API_KEY}&limit=1`
+            const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(searchTerm)}&count=1&language=en&format=json`
             const res = await fetch(url, {
                 headers: { 'Accept': 'application/json' }
             })
-
             if (res.ok) {
                 const data = await res.json()
-                if (Array.isArray(data) && data[0]) {
-                    const coords = { lat: Number(data[0].lat), lon: Number(data[0].lon) }
-                    console.log('Geocoded (maps.co)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
+                const first = data?.results?.[0]
+                if (first && Number.isFinite(first.latitude) && Number.isFinite(first.longitude)) {
+                    const coords = { lat: Number(first.latitude), lon: Number(first.longitude) }
+                    console.log('Geocoded (open-meteo)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
                     geocodeCache.set(cacheKey, coords)
                     return coords
                 }
             }
         } catch (err) {
-            console.error('maps.co geocode error for', searchTerm, ':', err.message)
+            console.error('open-meteo geocode error for', searchTerm, ':', err.message)
         }
-        // Rate limit - 1 request per second for free tier
-        await new Promise(r => setTimeout(r, 1000))
+        await new Promise(r => setTimeout(r, 400))
     }
 
     // Nominatim fallback
@@ -616,7 +641,6 @@ async function geocodePort(portName) {
     }
 
     console.error('All geocode attempts failed for:', portName)
-    geocodeCache.set(cacheKey, null)
     return null
 }
 
@@ -648,7 +672,11 @@ async function ensurePortCoordinates(vessel) {
 
     await Promise.all([setOrigin(), setDest()])
 
-    if (updated && vessel.originLat && vessel.destLat) {
+    const hasCoords = vessel.originLat && vessel.originLng && vessel.destLat && vessel.destLng
+    const needsRoute = !Array.isArray(vessel.route) || vessel.route.length < 2
+    const needsEta = !!(vessel.latitude && vessel.longitude && !vessel.eta)
+
+    if (hasCoords && (updated || needsRoute || needsEta)) {
         vessel.route = calculateRoute(
             vessel.originLat,
             vessel.originLng,
