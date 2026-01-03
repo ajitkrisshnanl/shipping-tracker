@@ -977,6 +977,46 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
         enriched.weather = await getMarineConditions(enriched.latitude, enriched.longitude)
     }
 
+    // Re-geocode on-the-fly if coordinates are missing but port names exist
+    if (enriched.origin && !enriched.originLat) {
+        console.log('Re-geocoding origin:', enriched.origin)
+        const originCoords = await geocodePort(enriched.origin)
+        if (originCoords) {
+            enriched.originLat = originCoords.lat
+            enriched.originLng = originCoords.lon
+            // Update stored data
+            const dbIdx = vesselDatabase.findIndex(v => v.mmsi === mmsi)
+            if (dbIdx >= 0) {
+                vesselDatabase[dbIdx].originLat = originCoords.lat
+                vesselDatabase[dbIdx].originLng = originCoords.lon
+            }
+            if (trackedVessels.has(mmsi)) {
+                const tv = trackedVessels.get(mmsi)
+                tv.originLat = originCoords.lat
+                tv.originLng = originCoords.lon
+            }
+        }
+    }
+    if (enriched.destination && !enriched.destLat) {
+        console.log('Re-geocoding destination:', enriched.destination)
+        const destCoords = await geocodePort(enriched.destination)
+        if (destCoords) {
+            enriched.destLat = destCoords.lat
+            enriched.destLng = destCoords.lon
+            // Update stored data
+            const dbIdx = vesselDatabase.findIndex(v => v.mmsi === mmsi)
+            if (dbIdx >= 0) {
+                vesselDatabase[dbIdx].destLat = destCoords.lat
+                vesselDatabase[dbIdx].destLng = destCoords.lon
+            }
+            if (trackedVessels.has(mmsi)) {
+                const tv = trackedVessels.get(mmsi)
+                tv.destLat = destCoords.lat
+                tv.destLng = destCoords.lon
+            }
+        }
+    }
+
     // Calculate route if we have origin/dest coordinates (even without live position)
     if (enriched.origin && enriched.destination && enriched.originLat && enriched.destLat) {
         const route = calculateRoute(
