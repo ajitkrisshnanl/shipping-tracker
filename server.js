@@ -432,6 +432,30 @@ async function geocodePort(portName) {
         }
     }
 
+    // Secondary free OSM endpoint (geocode.maps.co) as fallback
+    for (const searchTerm of variants) {
+        const url = `https://geocode.maps.co/search?q=${encodeURIComponent(searchTerm)}&limit=1`
+        try {
+            await new Promise(r => setTimeout(r, 500)) // gentle pacing
+            const res = await fetch(url, {
+                headers: {
+                    'Accept': 'application/json',
+                    'User-Agent': 'ShippingTracker/1.0 (+https://github.com/shipping-tracker)'
+                }
+            })
+            if (!res.ok) continue
+            const data = await res.json()
+            if (Array.isArray(data) && data[0]) {
+                const coords = { lat: Number(data[0].lat), lon: Number(data[0].lon) }
+                console.log('Geocoded (maps.co)', searchTerm, '->', coords.lat.toFixed(4), coords.lon.toFixed(4))
+                geocodeCache.set(cacheKey, coords)
+                return coords
+            }
+        } catch (err) {
+            console.error('maps.co geocode error for', searchTerm, ':', err.message)
+        }
+    }
+
     console.error('All geocode attempts failed for:', portName)
     geocodeCache.set(cacheKey, null)
     return null
