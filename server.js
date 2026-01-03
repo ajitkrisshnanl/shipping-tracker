@@ -1563,8 +1563,14 @@ app.get('/api/vessels', async (req, res) => {
     res.json({ vessels: sorted.slice(0, MAX_TRACKED_VESSELS) })
 })
 
-app.get('/api/bottlenecks', (req, res) => {
-    res.json({ bottlenecks: getBottlenecks() })
+app.get('/api/bottlenecks', async (req, res) => {
+    try {
+        const bottlenecks = await getBottlenecks()
+        res.json({ bottlenecks })
+    } catch (err) {
+        console.error('Bottlenecks fetch error:', err.message)
+        res.status(500).json({ error: 'Failed to fetch congestion data' })
+    }
 })
 
 app.get('/api/vessels/:mmsi/details', async (req, res) => {
