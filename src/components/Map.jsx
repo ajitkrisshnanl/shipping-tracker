@@ -1,74 +1,8 @@
-import { useEffect, useRef, useMemo } from 'react'
+import { useEffect, useRef, useMemo, memo, useCallback } from 'react'
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, CircleMarker, useMap } from 'react-leaflet'
 import L from 'leaflet'
 
-// Get congestion color based on severity (white -> yellow -> orange -> red gradient)
-function getCongestionColor(severity) {
-    // Severity is 'high' | 'medium' | 'low' from API
-    if (severity === 'high') return '#ef4444' // red
-    if (severity === 'medium') return '#fb923c' // orange
-    if (severity === 'low') return '#fde047' // yellow
-    return '#ffffff' // white - no congestion
-}
-
-// Convert severity string to numeric value for gradient calculations
-function severityToNumber(severity) {
-    if (severity === 'high') return 1.0
-    if (severity === 'medium') return 0.6
-    if (severity === 'low') return 0.3
-    return 0
-}
-
-// Calculate congestion level at a point based on proximity to congestion zones (from API)
-function getCongestionAtPoint(lat, lng, bottlenecks) {
-    let maxSeverity = 0
-    let nearestZone = null
-
-    for (const zone of bottlenecks) {
-        const dist = haversineDistance(lat, lng, zone.lat, zone.lng)
-        const zoneRadiusKm = (zone.radius || 50000) / 1000 * 1.5 // Convert meters to km, extend influence
-
-        if (dist < zoneRadiusKm) {
-            // Severity decreases with distance from zone center
-            const proximity = 1 - (dist / zoneRadiusKm)
-            const baseSeverity = severityToNumber(zone.severity)
-            const effectiveSeverity = baseSeverity * proximity
-
-            if (effectiveSeverity > maxSeverity) {
-                maxSeverity = effectiveSeverity
-                nearestZone = zone
-            }
-        }
-    }
-
-    return { severity: maxSeverity, zone: nearestZone }
-}
-
-// Get gradient color from severity number (0 to 1)
-function getGradientColor(severityNum) {
-    if (severityNum <= 0) return '#ffffff' // clean white for no congestion
-    if (severityNum < 0.25) return '#ffecec'
-    if (severityNum < 0.45) return '#ffcccc'
-    if (severityNum < 0.65) return '#ff9999'
-    if (severityNum < 0.85) return '#ff6666'
-    return '#e60000' // red - high congestion
-}
-
-function selectRouteMarkers(route) {
-    if (!route || route.length < 2) return []
-    const primary = route.filter((point) => point.type !== 'waypoint')
-    if (primary.length > 2) return primary
-
-    const maxMarkers = 6
-    const step = Math.max(1, Math.floor(route.length / (maxMarkers - 1)))
-    const sampled = route.filter((_, idx) => idx % step === 0 || idx === route.length - 1)
-    return sampled.map((point, idx) => ({
-        ...point,
-        type: idx === 0 ? 'origin' : idx === sampled.length - 1 ? 'destination' : 'waypoint'
-    }))
-}
-
-// Haversine distance
+// Haversine distance (km)
 function haversineDistance(lat1, lng1, lat2, lng2) {
     const R = 6371
     const dLat = (lat2 - lat1) * Math.PI / 180
@@ -79,9 +13,57 @@ function haversineDistance(lat1, lng1, lat2, lng2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
-// Split route into completed and remaining
+// Convert severity string to numeric value
+function severityToNumber(severity) {
+    if (severity === 'high') return 1.0
+    if (severity === 'medium') return 0.6
+    if (severity === 'low') return 0.3
+    return 0
+}
+
+// Get gradient color from severity number (0 to 1)
+function getGradientColor(severityNum) {
+    if (severityNum <= 0) return '#ffffff'
+    if (severityNum < 0.3) return '#ffe0e0'
+    if (severityNum < 0.5) return '#ffb0b0'
+    if (severityNum < 0.7) return '#ff7070'
+    if (severityNum < 0.9) return '#ff4040'
+    return '#e60000'
+}
+
+// Calculate congestion at a point based on proximity to zones
+function getCongestionAtPoint(lat, lng, bottlenecks) {
+    let maxSeverity = 0
+    for (const zone of bottlenecks) {
+        const dist = haversineDistance(lat, lng, zone.lat, zone.lng)
+        const zoneRadiusKm = (zone.radius || 50000) / 1000 * 1.5
+        if (dist < zoneRadiusKm) {
+            const proximity = 1 - (dist / zoneRadiusKm)
+            const effectiveSeverity = severityToNumber(zone.severity) * proximity
+            if (effectiveSeverity > maxSeverity) {
+                maxSeverity = effectiveSeverity
+            }
+        }
+    }
+    return maxSeverity
+}
+
+// Normalize route data
+function normalizeRoute(route = []) {
+    if (!Array.isArray(route)) return []
+    return route
+        .map((p) => ({
+            lat: Number(p.lat ?? p.latitude ?? p.Latitude),
+            lng: Number(p.lng ?? p.lon ?? p.longitude ?? p.Longitude),
+            name: p.name || p.port || 'Waypoint',
+            type: p.type || 'waypoint'
+        }))
+        .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng))
+}
+
+// Split route at current position
 function splitRoute(route, currentLat, currentLng) {
-    if (!route || route.length < 2) return { completed: [], remaining: [] }
+    if (!route || route.length < 2) return { completed: [], remaining: [], closestIdx: 0 }
 
     let closestIdx = 0
     let minDist = Infinity
@@ -103,58 +85,71 @@ function splitRoute(route, currentLat, currentLng) {
     return { completed, remaining, closestIdx }
 }
 
-// Interpolate points along a line segment for smoother congestion coloring
-function interpolatePoints(start, end, numPoints = 10) {
-    const points = []
-    for (let i = 0; i <= numPoints; i++) {
-        const t = i / numPoints
-        points.push({
-            lat: start.lat + (end.lat - start.lat) * t,
-            lng: start.lng + (end.lng - start.lng) * t
-        })
+// Create optimized congestion segments - groups consecutive same-color segments
+function createOptimizedCongestionSegments(route, bottlenecks) {
+    if (!route || route.length < 2 || !bottlenecks?.length) {
+        // No bottlenecks - return single white route
+        return [{
+            positions: route.map(p => [p.lat, p.lng]),
+            color: '#ffffff'
+        }]
     }
-    return points
-}
-
-// Create colored route segments based on congestion (using API data)
-function createCongestionSegments(route, bottlenecks) {
-    if (!route || route.length < 2) return []
 
     const segments = []
+    let currentSegment = { positions: [], color: null }
 
-    for (let i = 0; i < route.length - 1; i++) {
-        const start = route[i]
-        const end = route[i + 1]
+    for (let i = 0; i < route.length; i++) {
+        const point = route[i]
+        const severity = getCongestionAtPoint(point.lat, point.lng, bottlenecks)
+        const color = getGradientColor(severity)
 
-        // Interpolate points along this segment
-        const interpolated = interpolatePoints(
-            { lat: start.lat, lng: start.lng },
-            { lat: end.lat, lng: end.lng },
-            15 // More points for smoother gradient
-        )
-
-        // Create sub-segments with congestion colors
-        for (let j = 0; j < interpolated.length - 1; j++) {
-            const p1 = interpolated[j]
-            const p2 = interpolated[j + 1]
-            const midLat = (p1.lat + p2.lat) / 2
-            const midLng = (p1.lng + p2.lng) / 2
-
-            const { severity, zone } = getCongestionAtPoint(midLat, midLng, bottlenecks || [])
-
-            segments.push({
-                positions: [[p1.lat, p1.lng], [p2.lat, p2.lng]],
-                color: getGradientColor(severity),
-                severity,
-                zone
-            })
+        if (currentSegment.color === null) {
+            currentSegment.color = color
+            currentSegment.positions.push([point.lat, point.lng])
+        } else if (currentSegment.color === color) {
+            currentSegment.positions.push([point.lat, point.lng])
+        } else {
+            // Color changed - save current segment and start new one
+            if (currentSegment.positions.length >= 2) {
+                segments.push({ ...currentSegment })
+            }
+            // Start new segment with overlap for continuity
+            const lastPos = currentSegment.positions[currentSegment.positions.length - 1]
+            currentSegment = {
+                positions: [lastPos, [point.lat, point.lng]],
+                color: color
+            }
         }
     }
 
-    return segments
+    // Add final segment
+    if (currentSegment.positions.length >= 2) {
+        segments.push(currentSegment)
+    }
+
+    return segments.length > 0 ? segments : [{
+        positions: route.map(p => [p.lat, p.lng]),
+        color: '#ffffff'
+    }]
 }
 
-// Pre-create vessel icons (memoized for performance)
+// Select key waypoints for markers
+function selectRouteMarkers(route) {
+    if (!route || route.length < 2) return []
+    const primary = route.filter((point) => point.type !== 'waypoint')
+    if (primary.length >= 2) return primary
+
+    const maxMarkers = 5
+    const step = Math.max(1, Math.floor(route.length / (maxMarkers - 1)))
+    return route
+        .filter((_, idx) => idx === 0 || idx === route.length - 1 || idx % step === 0)
+        .map((point, idx, arr) => ({
+            ...point,
+            type: idx === 0 ? 'origin' : idx === arr.length - 1 ? 'destination' : 'waypoint'
+        }))
+}
+
+// Pre-created vessel icons
 const vesselIconNormal = L.divIcon({
     className: 'vessel-marker',
     iconSize: [16, 16],
@@ -167,44 +162,37 @@ const vesselIconSelected = L.divIcon({
     iconAnchor: [10, 10],
 })
 
-// Get cached icon based on selection state
 const getVesselIcon = (isSelected) => isSelected ? vesselIconSelected : vesselIconNormal
 
-function normalizeRoute(route = []) {
-    if (!Array.isArray(route)) return []
-    return route
-        .map((p) => ({
-            lat: Number(p.lat ?? p.latitude ?? p.Latitude),
-            lng: Number(p.lng ?? p.lon ?? p.longitude ?? p.Longitude),
-            name: p.name || p.port || 'Waypoint',
-            type: p.type || 'waypoint'
-        }))
-        .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lng))
-}
-
-// Map controller component
-function MapController({ selectedVessel, fullRoute }) {
+// Memoized Map Controller
+const MapController = memo(function MapController({ selectedVessel, fullRoute }) {
     const map = useMap()
+    const lastVesselRef = useRef(null)
 
     useEffect(() => {
+        if (!map) return
+
         if (fullRoute && fullRoute.length > 1) {
-            // Fit bounds to show full route
             const bounds = fullRoute.map(p => [p.lat, p.lng])
-            map.fitBounds(bounds, { padding: [50, 50], maxZoom: 5 })
-        } else if (selectedVessel && selectedVessel.latitude && selectedVessel.longitude) {
-            map.flyTo([selectedVessel.latitude, selectedVessel.longitude], 6, { duration: 1.5 })
+            map.fitBounds(bounds, { padding: [50, 50], maxZoom: 6, animate: true, duration: 0.5 })
+        } else if (selectedVessel?.latitude && selectedVessel?.longitude) {
+            // Only fly if vessel changed
+            if (lastVesselRef.current !== selectedVessel.mmsi) {
+                map.flyTo([selectedVessel.latitude, selectedVessel.longitude], 6, { duration: 1 })
+                lastVesselRef.current = selectedVessel.mmsi
+            }
         }
-    }, [selectedVessel, fullRoute, map])
+    }, [selectedVessel?.mmsi, fullRoute, map])
 
     return null
-}
+})
 
-// Bottleneck zone component
-function BottleneckZone({ zone }) {
+// Memoized Bottleneck Zone
+const BottleneckZone = memo(function BottleneckZone({ zone }) {
     const severityColors = {
-        high: { fill: 'rgba(239, 68, 68, 0.2)', stroke: '#ef4444' },
-        medium: { fill: 'rgba(245, 158, 11, 0.2)', stroke: '#f59e0b' },
-        low: { fill: 'rgba(34, 197, 94, 0.2)', stroke: '#22c55e' }
+        high: { fill: 'rgba(239, 68, 68, 0.15)', stroke: '#ef4444' },
+        medium: { fill: 'rgba(245, 158, 11, 0.15)', stroke: '#f59e0b' },
+        low: { fill: 'rgba(34, 197, 94, 0.15)', stroke: '#22c55e' }
     }
     const colors = severityColors[zone.severity] || severityColors.low
 
@@ -214,10 +202,10 @@ function BottleneckZone({ zone }) {
             radius={zone.radius || 50000}
             pathOptions={{
                 fillColor: colors.fill,
-                fillOpacity: 0.6,
+                fillOpacity: 0.5,
                 color: colors.stroke,
-                weight: 2,
-                dashArray: '5, 5'
+                weight: 1.5,
+                dashArray: '4, 4'
             }}
         >
             <Popup>
@@ -235,10 +223,10 @@ function BottleneckZone({ zone }) {
             </Popup>
         </Circle>
     )
-}
+})
 
-// Route waypoint marker
-function RouteWaypoint({ point, index }) {
+// Memoized Route Waypoint
+const RouteWaypoint = memo(function RouteWaypoint({ point }) {
     const colors = {
         origin: '#22c55e',
         destination: '#ef4444',
@@ -248,16 +236,17 @@ function RouteWaypoint({ point, index }) {
     }
 
     const color = colors[point.type] || colors.waypoint
+    const isEndpoint = point.type === 'origin' || point.type === 'destination'
 
     return (
         <CircleMarker
             center={[point.lat, point.lng]}
-            radius={point.type === 'origin' || point.type === 'destination' ? 8 : 5}
+            radius={isEndpoint ? 7 : 4}
             pathOptions={{
                 fillColor: color,
                 fillOpacity: 0.9,
                 color: 'white',
-                weight: 2
+                weight: isEndpoint ? 2 : 1
             }}
         >
             <Popup>
@@ -271,19 +260,110 @@ function RouteWaypoint({ point, index }) {
             </Popup>
         </CircleMarker>
     )
-}
+})
+
+// Memoized Vessel Marker
+const VesselMarker = memo(function VesselMarker({ vessel, isSelected, onSelect }) {
+    if (!vessel.latitude || !vessel.longitude) return null
+
+    return (
+        <Marker
+            position={[vessel.latitude, vessel.longitude]}
+            icon={getVesselIcon(isSelected)}
+            eventHandlers={{ click: onSelect }}
+        >
+            <Popup>
+                <div style={{ minWidth: 160, padding: '4px 0' }}>
+                    <strong style={{ fontSize: 14 }}>{vessel.name || 'Unknown'}</strong>
+                    <br />
+                    <span style={{ fontSize: 12, color: '#666' }}>
+                        MMSI: {vessel.mmsi}
+                    </span>
+                    <br />
+                    <span style={{ fontSize: 12 }}>
+                        Speed: {vessel.speed?.toFixed(1) || 0} kn
+                    </span>
+                    {vessel.destination && (
+                        <>
+                            <br />
+                            <span style={{ fontSize: 12 }}>→ {vessel.destination}</span>
+                        </>
+                    )}
+                </div>
+            </Popup>
+        </Marker>
+    )
+})
+
+// Route Polylines - memoized
+const RoutePolylines = memo(function RoutePolylines({ completedPath, congestionSegments, remainingPath }) {
+    return (
+        <>
+            {/* Completed route (solid green) */}
+            {completedPath && completedPath.length >= 2 && (
+                <Polyline
+                    positions={completedPath}
+                    pathOptions={{
+                        color: '#22c55e',
+                        weight: 4,
+                        opacity: 0.9,
+                        lineCap: 'round',
+                        lineJoin: 'round'
+                    }}
+                />
+            )}
+
+            {/* Congestion-colored route segments */}
+            {congestionSegments && congestionSegments.map((segment, idx) => (
+                <Polyline
+                    key={`seg-${idx}-${segment.color}`}
+                    positions={segment.positions}
+                    pathOptions={{
+                        color: segment.color,
+                        weight: 3,
+                        opacity: 0.85,
+                        lineCap: 'round',
+                        lineJoin: 'round'
+                    }}
+                />
+            ))}
+
+            {/* Fallback simple route */}
+            {(!congestionSegments || congestionSegments.length === 0) && remainingPath && remainingPath.length >= 2 && (
+                <Polyline
+                    positions={remainingPath}
+                    pathOptions={{
+                        color: '#ffffff',
+                        weight: 3,
+                        opacity: 0.7,
+                        dashArray: '10, 6',
+                        lineCap: 'round'
+                    }}
+                />
+            )}
+        </>
+    )
+})
 
 function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
     const mapRef = useRef(null)
 
-    // Calculate full route for selected vessel with congestion segments
-    const { fullRoute, completedPath, remainingPath, routeWaypoints, congestionSegments } = useMemo(() => {
-        if (!selectedVessel) return { fullRoute: null, completedPath: null, remainingPath: null, routeWaypoints: [], congestionSegments: [] }
+    // Stable vessel select callback
+    const handleVesselSelect = useCallback((vessel) => {
+        onVesselSelect(vessel)
+    }, [onVesselSelect])
+
+    // Memoized route data - only recalculate when vessel or bottlenecks change
+    const routeData = useMemo(() => {
+        if (!selectedVessel) {
+            return { fullRoute: null, completedPath: null, remainingPath: null, routeWaypoints: [], congestionSegments: [] }
+        }
 
         const hasOrigin = selectedVessel.originLat && selectedVessel.originLng
         const hasDest = selectedVessel.destLat && selectedVessel.destLng
         const hasCurrent = selectedVessel.latitude && selectedVessel.longitude
 
+        // Get route from API or construct from origin/dest
         const routeFromApi = normalizeRoute(selectedVessel.route)
         const route = routeFromApi.length >= 2
             ? routeFromApi
@@ -294,37 +374,38 @@ function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
                 ]
                 : [])
 
-        if (route.length < 2) return { fullRoute: null, completedPath: null, remainingPath: null, routeWaypoints: [], congestionSegments: [] }
+        if (route.length < 2) {
+            return { fullRoute: null, completedPath: null, remainingPath: null, routeWaypoints: [], congestionSegments: [] }
+        }
 
-        // Create congestion-colored segments for the remaining route (using API bottleneck data)
-        const segments = createCongestionSegments(route, bottlenecks)
+        const routeWaypoints = selectRouteMarkers(route)
 
-        // Split into completed and remaining based on current position
         if (hasCurrent) {
             const { completed, remaining, closestIdx } = splitRoute(route, selectedVessel.latitude, selectedVessel.longitude)
-
-            // Filter congestion segments to only show remaining route
             const remainingRoute = route.slice(closestIdx)
-            const remainingSegments = createCongestionSegments(remainingRoute, bottlenecks)
+            const congestionSegments = createOptimizedCongestionSegments(remainingRoute, bottlenecks || [])
 
             return {
                 fullRoute: route,
                 completedPath: completed,
                 remainingPath: remaining,
-                routeWaypoints: selectRouteMarkers(route),
-                congestionSegments: remainingSegments
+                routeWaypoints,
+                congestionSegments
             }
         }
 
-        // No current position - show entire route with congestion
+        // No current position - show entire route
+        const congestionSegments = createOptimizedCongestionSegments(route, bottlenecks || [])
         return {
             fullRoute: route,
             completedPath: null,
             remainingPath: route.map(p => [p.lat, p.lng]),
-            routeWaypoints: selectRouteMarkers(route),
-            congestionSegments: segments
+            routeWaypoints,
+            congestionSegments
         }
-    }, [selectedVessel, bottlenecks])
+    }, [selectedVessel?.mmsi, selectedVessel?.route, selectedVessel?.latitude, selectedVessel?.longitude, bottlenecks])
+
+    const { fullRoute, completedPath, remainingPath, routeWaypoints, congestionSegments } = routeData
 
     return (
         <div className="map-container">
@@ -340,124 +421,45 @@ function Map({ vessels, selectedVessel, bottlenecks, onVesselSelect }) {
                 scrollWheelZoom={true}
                 doubleClickZoom={true}
                 attributionControl={false}
+                preferCanvas={true}
             >
-                {/* Dark ocean tile layer */}
                 <TileLayer
                     url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                    attribution='&copy; OpenStreetMap'
                     noWrap={true}
                 />
 
-                {/* Map controller for animations */}
                 <MapController selectedVessel={selectedVessel} fullRoute={fullRoute} />
 
                 {/* Bottleneck zones */}
-                {bottlenecks.map((zone, index) => (
-                    <BottleneckZone key={zone.id || index} zone={zone} />
+                {bottlenecks?.map((zone) => (
+                    <BottleneckZone key={zone.id || zone.name} zone={zone} />
                 ))}
 
-                {/* Completed route (solid green line - already traveled) */}
-                {completedPath && completedPath.length >= 2 && (
-                    <Polyline
-                        positions={completedPath}
-                        pathOptions={{
-                            color: '#22c55e',
-                            weight: 5,
-                            opacity: 0.9,
-                            lineCap: 'round',
-                            lineJoin: 'round'
-                        }}
-                    />
-                )}
+                {/* Route lines */}
+                <RoutePolylines
+                    completedPath={completedPath}
+                    congestionSegments={congestionSegments}
+                    remainingPath={remainingPath}
+                />
 
-                {/* Remaining route with congestion heatmap (colored segments) */}
-                {congestionSegments && congestionSegments.map((segment, idx) => (
-                    <Polyline
-                        key={`congestion-${idx}`}
-                        positions={segment.positions}
-                        pathOptions={{
-                            color: segment.color,
-                            weight: 4,
-                            opacity: 0.85,
-                            lineCap: 'round',
-                            lineJoin: 'round'
-                        }}
-                    >
-                        {segment.zone && (
-                            <Popup>
-                                <div style={{ padding: '4px 0' }}>
-                                    <strong style={{ color: segment.color }}>{segment.zone.name}</strong>
-                                    <br />
-                                    <span style={{ fontSize: 12 }}>
-                                        Delay: +{segment.zone.estimatedDelay || segment.zone.delay} min
-                                    </span>
-                                </div>
-                            </Popup>
-                        )}
-                    </Polyline>
-                ))}
-
-                {/* Fallback: simple remaining route if no congestion segments */}
-                {(!congestionSegments || congestionSegments.length === 0) && remainingPath && remainingPath.length >= 2 && (
-                    <Polyline
-                        positions={remainingPath}
-                        pathOptions={{
-                            color: '#ffffff',
-                            weight: 3,
-                            opacity: 0.7,
-                            dashArray: '12, 8',
-                            lineCap: 'round'
-                        }}
-                    />
-                )}
-
-                {/* Route waypoints (ports, passages) */}
-                {routeWaypoints && routeWaypoints.map((point, index) => (
-                    <RouteWaypoint key={index} point={point} index={index} />
+                {/* Route waypoints */}
+                {routeWaypoints?.map((point, idx) => (
+                    <RouteWaypoint key={`wp-${idx}-${point.name}`} point={point} />
                 ))}
 
                 {/* Vessel markers */}
-                {vessels.map(vessel => {
-                    if (!vessel.latitude || !vessel.longitude) return null
-                    const isSelected = selectedVessel?.mmsi === vessel.mmsi
-
-                    return (
-                        <Marker
-                            key={vessel.mmsi}
-                            position={[vessel.latitude, vessel.longitude]}
-                            icon={getVesselIcon(isSelected)}
-                            eventHandlers={{
-                                click: () => onVesselSelect(vessel)
-                            }}
-                        >
-                            <Popup>
-                                <div style={{ minWidth: 180, padding: '4px 0' }}>
-                                    <strong style={{ fontSize: 14 }}>{vessel.name || 'Unknown'}</strong>
-                                    <br />
-                                    <span style={{ fontSize: 12, color: '#666' }}>
-                                        MMSI: {vessel.mmsi}
-                                    </span>
-                                    <br />
-                                    <span style={{ fontSize: 12 }}>
-                                        Speed: {vessel.speed?.toFixed(1) || 0} kn |
-                                        Heading: {vessel.heading || vessel.cog || 0}°
-                                    </span>
-                                    {vessel.destination && (
-                                        <>
-                                            <br />
-                                            <span style={{ fontSize: 12 }}>
-                                                → {vessel.destination}
-                                            </span>
-                                        </>
-                                    )}
-                                </div>
-                            </Popup>
-                        </Marker>
-                    )
-                })}
+                {vessels?.map(vessel => (
+                    <VesselMarker
+                        key={vessel.mmsi}
+                        vessel={vessel}
+                        isSelected={selectedVessel?.mmsi === vessel.mmsi}
+                        onSelect={() => handleVesselSelect(vessel)}
+                    />
+                ))}
             </MapContainer>
         </div>
     )
 }
 
-export default Map
+export default memo(Map)
