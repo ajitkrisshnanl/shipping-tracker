@@ -27,8 +27,7 @@ const openai = process.env.OPENAI_API_KEY
     ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
     : null
 const OPENAI_MODELS = [
-    process.env.OPENAI_MODEL || 'gpt-5.2',
-    process.env.OPENAI_FALLBACK_MODEL || 'gpt-5.1'
+    process.env.OPENAI_MODEL || 'gpt-5.2'
 ]
 
 const app = express()
