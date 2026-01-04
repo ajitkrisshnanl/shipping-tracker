@@ -255,18 +255,18 @@ function getTrackingUrl(carrierId, trackingNumber) {
  * Attempt to fetch carrier ETA via public APIs (limited availability)
  * Most carriers require authentication, so this is best-effort
  * @param {string} carrierId - Carrier ID
- * @param {string} blNumber - Bill of Lading number
+ * @param {string} trackingNumber - BL or container/booking number
  * @returns {Object} - { eta, source, error }
  */
-async function fetchCarrierETA(carrierId, blNumber) {
+async function fetchCarrierETA(carrierId, trackingNumber) {
     // Currently, most carrier APIs require authentication
     // This function can be expanded as we get access to carrier APIs
 
     // Maersk has a public track API that sometimes works
-    if (carrierId === 'maersk' && blNumber) {
+    if (carrierId === 'maersk' && trackingNumber) {
         try {
             // Note: This endpoint may require an API key in production
-            const url = `https://api.maersk.com/track/${encodeURIComponent(blNumber)}`
+            const url = `https://api.maersk.com/track/${encodeURIComponent(trackingNumber)}`
             const res = await fetchWithTimeout(url, {
                 headers: {
                     'Accept': 'application/json',

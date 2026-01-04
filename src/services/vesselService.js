@@ -203,6 +203,18 @@ class VesselService {
         const data = await response.json()
         return data.subscription
     }
+
+    async fetchCarrierETA({ carrierId, trackingNumber }) {
+        const params = new URLSearchParams()
+        if (carrierId) params.set('carrierId', carrierId)
+        if (trackingNumber) params.set('trackingNumber', trackingNumber)
+        const response = await fetchWithTimeout(`/api/carrier/eta?${params.toString()}`)
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}))
+            throw new Error(err.error || 'Failed to fetch carrier ETA')
+        }
+        return response.json()
+    }
 }
 
 export const vesselService = new VesselService()

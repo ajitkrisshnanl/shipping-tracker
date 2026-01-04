@@ -657,6 +657,7 @@ body {
   top: 16px;
   right: 16px;
   width: 320px;
+  max-height: calc(100vh - 32px);
   background: var(--bg-glass);
   backdrop-filter: blur(20px);
   border: 1px solid var(--border-subtle);
@@ -667,6 +668,8 @@ body {
   animation: slideIn 0.3s ease-out;
   overscroll-behavior: contain;
   touch-action: pan-y;
+  display: flex;
+  flex-direction: column;
 }
 
 @keyframes slideIn {
@@ -686,6 +689,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  background: var(--bg-glass);
 }
 
 .info-panel-title {
@@ -714,6 +718,10 @@ body {
 
 .info-panel-content {
   padding: 16px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .info-section {
@@ -891,6 +899,15 @@ body {
 
 .carrier-tracking-link svg {
   flex-shrink: 0;
+}
+
+.carrier-eta-actions {
+  margin-top: 10px;
+  display: flex;
+}
+
+.carrier-eta-actions .secondary-btn {
+  width: 100%;
 }
 
 .info-value.mono {
@@ -1202,8 +1219,7 @@ body {
     max-height: 85vh;
     border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;
     animation: slideUp 0.3s ease-out;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow: hidden;
   }
 
   @keyframes slideUp {

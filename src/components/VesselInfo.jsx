@@ -34,11 +34,15 @@ function VesselInfo({ vessel, onClose }) {
     const [notificationSuccess, setNotificationSuccess] = useState(null)
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [sendingId, setSendingId] = useState(null)
+    const [carrierEta, setCarrierEta] = useState(null)
+    const [carrierEtaError, setCarrierEtaError] = useState(null)
+    const [carrierEtaLoading, setCarrierEtaLoading] = useState(false)
     const [isMinimized, setIsMinimized] = useState(() => {
         if (typeof window === 'undefined') return false
         return window.matchMedia('(max-width: 768px)').matches
     })
     const touchStartY = useRef(null)
+    const trackingNumber = vessel?.blNumber || vessel?.bookingNumber || vessel?.containerNumber || null
 
     // Format ETA
     const formatETA = (date) => {
@@ -49,6 +53,13 @@ function VesselInfo({ vessel, onClose }) {
             day: 'numeric',
             year: 'numeric'
         })
+    }
+
+    const formatCarrierETA = (etaValue) => {
+        if (!etaValue) return 'Unavailable'
+        const date = new Date(etaValue)
+        if (Number.isNaN(date.getTime())) return etaValue
+        return formatETA(date)
     }
 
     useEffect(() => {
@@ -63,6 +74,12 @@ function VesselInfo({ vessel, onClose }) {
                 })
         }
         return () => { active = false }
+    }, [vessel?.mmsi])
+
+    useEffect(() => {
+        setCarrierEta(null)
+        setCarrierEtaError(null)
+        setCarrierEtaLoading(false)
     }, [vessel?.mmsi])
 
     useEffect(() => {
@@ -139,6 +156,29 @@ function VesselInfo({ vessel, onClose }) {
             setNotificationError(err.message)
         } finally {
             setSendingId(null)
+        }
+    }
+
+    const handleFetchCarrierEta = async () => {
+        if (!vessel?.carrierId || !trackingNumber) return
+        setCarrierEtaError(null)
+        setCarrierEtaLoading(true)
+        try {
+            const result = await vesselService.fetchCarrierETA({
+                carrierId: vessel.carrierId,
+                trackingNumber
+            })
+            if (result?.eta) {
+                setCarrierEta(result)
+            } else {
+                setCarrierEta(null)
+                setCarrierEtaError(result?.error || 'Carrier ETA not available')
+            }
+        } catch (err) {
+            setCarrierEta(null)
+            setCarrierEtaError(err.message)
+        } finally {
+            setCarrierEtaLoading(false)
         }
     }
 
@@ -233,7 +273,7 @@ function VesselInfo({ vessel, onClose }) {
                 </div>
 
                 {/* Carrier Tracking */}
-                {vessel.carrierTrackingUrl && (
+                {(vessel.carrierTrackingUrl || vessel.carrierId) && (
                     <div className="info-section">
                         <div className="info-section-title">Carrier Tracking</div>
                         {vessel.blNumber && (
@@ -248,18 +288,43 @@ function VesselInfo({ vessel, onClose }) {
                                 <span className="info-value mono">{vessel.containerNumber}</span>
                             </div>
                         )}
-                        <a
-                            href={vessel.carrierTrackingUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="carrier-tracking-link"
-                            style={vessel.carrierColor ? { backgroundColor: vessel.carrierColor } : {}}
-                        >
-                            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-                                <path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/>
-                            </svg>
-                            Track on {vessel.carrier}
-                        </a>
+                        {vessel.carrierTrackingUrl && (
+                            <a
+                                href={vessel.carrierTrackingUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="carrier-tracking-link"
+                                style={vessel.carrierColor ? { backgroundColor: vessel.carrierColor } : {}}
+                            >
+                                <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                                    <path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/>
+                                </svg>
+                                Track on {vessel.carrier || 'Carrier'}
+                            </a>
+                        )}
+                        {vessel.carrierId && trackingNumber && (
+                            <div className="carrier-eta-actions">
+                                <button
+                                    type="button"
+                                    className="secondary-btn"
+                                    onClick={handleFetchCarrierEta}
+                                    disabled={carrierEtaLoading}
+                                >
+                                    {carrierEtaLoading ? 'Checking Carrier ETA...' : 'Load Carrier ETA'}
+                                </button>
+                            </div>
+                        )}
+                        {carrierEta?.eta && (
+                            <div className="info-row">
+                                <span className="info-label">Carrier ETA</span>
+                                <span className="info-value">{formatCarrierETA(carrierEta.eta)}</span>
+                            </div>
+                        )}
+                        {carrierEtaError && (
+                            <div className="error-message" style={{ marginTop: 8 }}>
+                                {carrierEtaError}
+                            </div>
+                        )}
                     </div>
                 )}
 

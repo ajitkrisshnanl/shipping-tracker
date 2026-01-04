@@ -1763,6 +1763,25 @@ app.get('/api/notifications', (req, res) => {
     res.json({ subscriptions: list })
 })
 
+app.get('/api/carrier/eta', async (req, res) => {
+    const carrierId = req.query.carrierId?.toString()
+    const trackingNumber = req.query.trackingNumber?.toString()
+        || req.query.blNumber?.toString()
+        || req.query.bookingNumber?.toString()
+        || req.query.containerNumber?.toString()
+
+    if (!carrierId || !trackingNumber) {
+        return res.status(400).json({ error: 'carrierId and trackingNumber required' })
+    }
+
+    try {
+        const result = await fetchCarrierETA(carrierId, trackingNumber)
+        res.json({ ...result, carrierId, trackingNumber })
+    } catch (err) {
+        res.status(500).json({ error: err.message })
+    }
+})
+
 app.post('/api/notifications', async (req, res) => {
     if (!EMAIL_ENABLED) {
         return res.status(400).json({ error: 'Email service not configured' })
