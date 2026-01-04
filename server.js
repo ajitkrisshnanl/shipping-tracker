@@ -22,7 +22,7 @@ const genAI = process.env.GEMINI_API_KEY
     ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
     : null
 
-// Initialize OpenAI client (fallback)
+// Initialize OpenAI client
 const openai = process.env.OPENAI_API_KEY
     ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
     : null
@@ -892,22 +892,22 @@ async function extractWithOpenAIPDF(pdfBuffer) {
 }
 
 async function extractVesselDetailsFromPDFImage(pdfBuffer, extractedText = '') {
-    // Try Gemini 3 Flash first (supports PDF directly)
-    let result = await extractWithGemini(pdfBuffer)
+    // Try OpenAI PDF first (if configured)
+    let result = await extractWithOpenAIPDF(pdfBuffer)
     if (result && result.vessel) {
         return result
     }
 
-    // Fallback to OpenAI with PDF file upload
-    console.log('Gemini failed, trying OpenAI PDF fallback...')
-    result = await extractWithOpenAIPDF(pdfBuffer)
+    // Fallback to Gemini 3 Flash (supports PDF directly)
+    console.log('OpenAI PDF failed, trying Gemini PDF...')
+    result = await extractWithGemini(pdfBuffer)
     if (result && result.vessel) {
         return result
     }
 
     // Last resort: try OpenAI with extracted text (if any)
     if (extractedText && extractedText.length > 50) {
-        console.log('OpenAI PDF failed, trying with text...')
+        console.log('PDF vision failed, trying OpenAI text...')
         result = await extractWithOpenAIText(extractedText)
         if (result && result.vessel) {
             return result
@@ -930,7 +930,14 @@ async function extractVesselDetailsWithAI(text) {
         }
     }
 
-    // Try Gemini first
+    // Try OpenAI first
+    const gptResult = await extractWithOpenAIText(text)
+    if (gptResult && gptResult.vessel) {
+        return gptResult
+    }
+
+    // Fallback to Gemini
+    console.log('OpenAI failed, trying Gemini for text extraction...')
     if (genAI) {
         try {
             const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' })
@@ -949,13 +956,6 @@ async function extractVesselDetailsWithAI(text) {
         } catch (error) {
             console.error('Gemini text extraction error:', error.message)
         }
-    }
-
-    // Fallback to OpenAI
-    console.log('Gemini failed, trying OpenAI for text extraction...')
-    const gptResult = await extractWithOpenAIText(text)
-    if (gptResult && gptResult.vessel) {
-        return gptResult
     }
 
     return {
