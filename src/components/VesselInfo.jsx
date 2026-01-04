@@ -351,13 +351,14 @@ function VesselInfo({ vessel, onClose }) {
                                 value={cadenceHours}
                                 onChange={(e) => setCadenceHours(Number(e.target.value))}
                                 style={{
-                                    width: 80,
+                                    width: 96,
+                                    minHeight: 36,
                                     textAlign: 'right',
                                     background: 'var(--bg-tertiary)',
                                     border: '1px solid var(--border-subtle)',
                                     color: 'var(--text-primary)',
                                     borderRadius: 6,
-                                    padding: '4px 6px'
+                                    padding: '6px 8px'
                                 }}
                             />
                         </label>

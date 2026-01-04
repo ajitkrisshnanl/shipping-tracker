@@ -665,6 +665,8 @@ body {
   z-index: 1000;
   overflow: hidden;
   animation: slideIn 0.3s ease-out;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
 }
 
 @keyframes slideIn {
@@ -1093,13 +1095,13 @@ body {
 
   /* Info panel - bottom sheet on mobile */
   .info-panel {
-    position: absolute;
+    position: fixed;
     top: auto;
     bottom: 0;
     left: 0;
     right: 0;
     width: 100%;
-    max-height: 70%;
+    max-height: 85vh;
     border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;
     animation: slideUp 0.3s ease-out;
     overflow-y: auto;
@@ -1166,7 +1168,7 @@ body {
   }
 
   .info-panel.minimized {
-    max-height: 22%;
+    max-height: 20%;
     overflow: hidden;
   }
 
@@ -1186,6 +1188,10 @@ body {
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-tertiary);
     font-size: 12px;
+  }
+
+  .info-panel-content {
+    padding-bottom: max(40px, env(safe-area-inset-bottom));
   }
 
   /* Map controls positioning */
