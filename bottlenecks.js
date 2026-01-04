@@ -459,6 +459,65 @@ function checkBottleneckProximity(vesselLat, vesselLng) {
 }
 
 /**
+ * Calculate cumulative delay for actual route traversal through bottleneck zones
+ * Checks each waypoint in the route against all bottleneck zones
+ * @param {Array} route - Array of {lat, lng} waypoints
+ * @param {Array} bottlenecks - Array of bottleneck zones (from getBottlenecks or getBottlenecksSync)
+ * @returns {Object} - { totalDelayMinutes, delays: [{zone, delay, severity}] }
+ */
+function calculateRouteBottleneckDelay(route, bottlenecks) {
+    if (!route || route.length === 0 || !bottlenecks || bottlenecks.length === 0) {
+        return { totalDelayMinutes: 0, delays: [] }
+    }
+
+    const passedZones = new Set() // Avoid double-counting zones
+    let totalDelayMinutes = 0
+    const delays = []
+
+    for (const waypoint of route) {
+        if (!waypoint.lat || !waypoint.lng) continue
+
+        for (const zone of bottlenecks) {
+            // Skip if we've already counted this zone
+            if (passedZones.has(zone.id)) continue
+
+            const dist = haversineDistance(waypoint.lat, waypoint.lng, zone.lat, zone.lng)
+            const zoneRadiusMeters = zone.radius || 50000
+
+            // Check if waypoint is within zone radius
+            if (dist <= zoneRadiusMeters) {
+                passedZones.add(zone.id)
+
+                // Use pre-calculated severity if available, otherwise calculate
+                let delayMinutes, severity
+                if (zone.estimatedDelay !== undefined && zone.severity) {
+                    delayMinutes = zone.estimatedDelay
+                    severity = zone.severity
+                } else {
+                    // Get cached weather data for dynamic severity calculation
+                    const weatherKey = `weather_${zone.id}`
+                    const cachedWeather = congestionCache.get(weatherKey)?.data
+                    const dynamicData = calculateDynamicSeverity(zone, cachedWeather)
+                    delayMinutes = dynamicData.estimatedDelay
+                    severity = dynamicData.severity
+                }
+
+                totalDelayMinutes += delayMinutes
+                delays.push({
+                    zoneId: zone.id,
+                    zone: zone.name,
+                    delay: delayMinutes,
+                    severity,
+                    description: zone.description
+                })
+            }
+        }
+    }
+
+    return { totalDelayMinutes, delays }
+}
+
+/**
  * Estimate delivery delay based on route
  * Checks if route passes through any known bottlenecks (uses cached weather + time patterns)
  */
@@ -500,6 +559,7 @@ module.exports = {
     getBottlenecksSync,
     checkBottleneckProximity,
     estimateRouteDelay,
+    calculateRouteBottleneckDelay,
     haversineDistance,
     fetchWeatherForZone,
     getTimeBasedCongestion

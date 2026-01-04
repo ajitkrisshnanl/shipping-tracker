@@ -13,8 +13,9 @@ const pdfParse = require('pdf-parse')
 const { GoogleGenerativeAI } = require('@google/generative-ai')
 const OpenAI = require('openai')
 const nodemailer = require('nodemailer')
-const { getBottlenecks, checkBottleneckProximity, estimateRouteDelay } = require('./bottlenecks')
+const { getBottlenecks, getBottlenecksSync, checkBottleneckProximity, estimateRouteDelay } = require('./bottlenecks')
 const { calculateRoute, estimateArrival } = require('./seaRoutes')
+const { detectCarrier, fetchCarrierETA, getTrackingUrl } = require('./carrierTracking')
 
 // Initialize Gemini client
 const genAI = process.env.GEMINI_API_KEY
@@ -244,10 +245,13 @@ async function sendVesselEmailUpdate(subscription) {
     await ensureRoute(liveVessel)
 
     if (liveVessel.route && liveVessel.route.length >= 2 && liveVessel.latitude && liveVessel.longitude) {
-        const etaCalc = estimateArrival(liveVessel.route, liveVessel.latitude, liveVessel.longitude, liveVessel.speed || 12)
+        const bottlenecks = getBottlenecksSync()
+        const etaCalc = estimateArrival(liveVessel.route, liveVessel.latitude, liveVessel.longitude, liveVessel.speed || 12, { bottlenecks })
         liveVessel.eta = etaCalc?.eta || liveVessel.eta
         liveVessel.distanceRemainingNm = etaCalc?.distanceRemaining || liveVessel.distanceRemainingNm || null
         liveVessel.hoursRemaining = etaCalc?.hoursRemaining || liveVessel.hoursRemaining || null
+        liveVessel.bottleneckDelayMinutes = etaCalc?.bottleneckDelayMinutes || 0
+        liveVessel.bottlenecksPassed = etaCalc?.bottlenecksPassed || []
     }
 
     let weather = null
@@ -660,10 +664,13 @@ async function refreshPositionForVessel(vessel, options = {}) {
     if (updated.route && updated.route.length >= 2) {
         updated.nextWaypoint = updated.route[1] || null
         if (updated.latitude && updated.longitude) {
-            const etaCalc = estimateArrival(updated.route, updated.latitude, updated.longitude, updated.speed || 12)
+            const bottlenecks = getBottlenecksSync()
+            const etaCalc = estimateArrival(updated.route, updated.latitude, updated.longitude, updated.speed || 12, { bottlenecks })
             updated.eta = etaCalc?.eta || updated.eta
             updated.distanceRemainingNm = etaCalc?.distanceRemaining || null
             updated.hoursRemaining = etaCalc?.hoursRemaining || null
+            updated.bottleneckDelayMinutes = etaCalc?.bottleneckDelayMinutes || 0
+            updated.bottlenecksPassed = etaCalc?.bottlenecksPassed || []
         }
     }
 
@@ -728,13 +735,18 @@ Return ONLY a valid JSON object with these fields (use null for missing values):
   "blNumber": "bill of lading number",
   "shipper": "shipper/exporter name",
   "consignee": "consignee name",
-  "mmsi": "9-digit MMSI number if visible"
+  "mmsi": "9-digit MMSI number if visible",
+  "carrier": "shipping line/carrier name (e.g., Maersk, MSC, CMA CGM, Hapag-Lloyd, OOCL, Evergreen, ONE, Yang Ming, Cosco, PIL)",
+  "bookingNumber": "booking or reference number if different from BL number",
+  "containerNumber": "container number (e.g., MSKU1234567)"
 }
 
 Important rules:
 - Prefer the exact POL and POD fields from the BL (not the final inland destination)
 - Extract the actual port/city names, not labels
 - Vessel name should be just the ship name without voyage number
+- Carrier can often be identified from the BL header/logo, BL number prefix, or stated shipping line
+- Common BL prefixes: MAEU/MSKU=Maersk, MSCU=MSC, CMAU=CMA CGM, HLCU=Hapag-Lloyd, OOLU=OOCL, EISU=Evergreen, ONEY=ONE
 - Return ONLY valid JSON, no markdown code blocks, no explanation`
 
 async function extractWithGemini(pdfBuffer) {
@@ -1401,6 +1413,14 @@ async function createVesselFromImport(details, rawText = '') {
     // Check if we have cached position from previous scraper refresh
     const cachedPosition = getLivePosition(mmsi)
 
+    // Detect carrier from BL data
+    const carrierInfo = detectCarrier({
+        blNumber: details.blNumber,
+        carrier: details.carrier,
+        containerNumber: details.containerNumber
+    })
+    console.log('Carrier detection:', carrierInfo)
+
     const vessel = {
         mmsi: mmsi.toString(),
         name: vesselInfo?.name || vesselName,
@@ -1413,9 +1433,17 @@ async function createVesselFromImport(details, rawText = '') {
         voyage: details.voyage || null,
         voyageNo: details.voyage || null,
         blNumber: details.blNumber || null,
+        bookingNumber: details.bookingNumber || null,
+        containerNumber: details.containerNumber || null,
         shipper: details.shipper || null,
         consignee: details.consignee || null,
         finalDestination: finalDestination,
+        // Carrier info
+        carrier: carrierInfo?.name || details.carrier || null,
+        carrierId: carrierInfo?.id || null,
+        carrierTrackingUrl: carrierInfo?.trackingUrl || null,
+        carrierColor: carrierInfo?.color || null,
+        // Coordinates
         originLat: originCoords?.lat ?? null,
         originLng: originCoords?.lon ?? null,
         destLat: destCoords?.lat ?? null,
@@ -1441,10 +1469,13 @@ async function createVesselFromImport(details, rawText = '') {
         console.log('Route calculated:', vessel.route.length, 'waypoints')
 
         if (vessel.latitude && vessel.longitude) {
-            const etaCalc = estimateArrival(vessel.route, vessel.latitude, vessel.longitude, vessel.speed || 12)
+            const bottlenecks = getBottlenecksSync()
+            const etaCalc = estimateArrival(vessel.route, vessel.latitude, vessel.longitude, vessel.speed || 12, { bottlenecks })
             vessel.eta = etaCalc?.eta || details.eta || vesselStatus?.eta || null
             vessel.distanceRemainingNm = etaCalc?.distanceRemaining || null
             vessel.hoursRemaining = etaCalc?.hoursRemaining || null
+            vessel.bottleneckDelayMinutes = etaCalc?.bottleneckDelayMinutes || 0
+            vessel.bottlenecksPassed = etaCalc?.bottlenecksPassed || []
         } else {
             vessel.eta = details.eta || null
         }
@@ -1706,10 +1737,13 @@ app.get('/api/vessels/:mmsi/details', async (req, res) => {
     if (enriched.route && enriched.route.length >= 2) {
         enriched.nextWaypoint = enriched.route[1] || null
         if (enriched.latitude && enriched.longitude) {
-            const etaCalc = estimateArrival(enriched.route, enriched.latitude, enriched.longitude, enriched.speed || 12)
+            const bottlenecks = getBottlenecksSync()
+            const etaCalc = estimateArrival(enriched.route, enriched.latitude, enriched.longitude, enriched.speed || 12, { bottlenecks })
             enriched.eta = etaCalc?.eta || enriched.eta
             enriched.distanceRemainingNm = etaCalc?.distanceRemaining || null
             enriched.hoursRemaining = etaCalc?.hoursRemaining || null
+            enriched.bottleneckDelayMinutes = etaCalc?.bottleneckDelayMinutes || 0
+            enriched.bottlenecksPassed = etaCalc?.bottlenecksPassed || []
         }
     }
 

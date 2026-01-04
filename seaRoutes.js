@@ -4,6 +4,7 @@
  */
 
 const searoute = require('searoute-js')
+const { calculateRouteBottleneckDelay } = require('./bottlenecks')
 
 // Vessel type average speeds in knots (for ETA estimation when live speed unavailable)
 const VESSEL_TYPE_SPEEDS = {
@@ -181,14 +182,31 @@ function estimateArrival(route, currentLat, currentLng, speedKnots, options = {}
         effectiveSpeed = adjustSpeedForWeather(effectiveSpeed, options.weather)
     }
 
-    const hoursRemaining = remainingDistance / effectiveSpeed
+    // Base travel time
+    let hoursRemaining = remainingDistance / effectiveSpeed
+
+    // Calculate bottleneck delays along the remaining route
+    let bottleneckDelayMinutes = 0
+    let bottlenecksPassed = []
+
+    if (options.bottlenecks && options.bottlenecks.length > 0) {
+        const delayResult = calculateRouteBottleneckDelay(remaining, options.bottlenecks)
+        bottleneckDelayMinutes = delayResult.totalDelayMinutes
+        bottlenecksPassed = delayResult.delays
+
+        // Add bottleneck delays to total time
+        hoursRemaining += bottleneckDelayMinutes / 60
+    }
+
     const eta = new Date(Date.now() + hoursRemaining * 60 * 60 * 1000)
 
     return {
         eta: eta.toISOString(),
         distanceRemaining: Math.round(remainingDistance),
         hoursRemaining: Math.round(hoursRemaining),
-        effectiveSpeed: Math.round(effectiveSpeed * 10) / 10
+        effectiveSpeed: Math.round(effectiveSpeed * 10) / 10,
+        bottleneckDelayMinutes: Math.round(bottleneckDelayMinutes),
+        bottlenecksPassed
     }
 }
 

@@ -222,7 +222,46 @@ function VesselInfo({ vessel, onClose }) {
                             <span className="info-value">{vessel.flag}</span>
                         </div>
                     )}
+                    {vessel.carrier && (
+                        <div className="info-row">
+                            <span className="info-label">Carrier</span>
+                            <span className="info-value carrier-name" style={vessel.carrierColor ? { color: vessel.carrierColor } : {}}>
+                                {vessel.carrier}
+                            </span>
+                        </div>
+                    )}
                 </div>
+
+                {/* Carrier Tracking */}
+                {vessel.carrierTrackingUrl && (
+                    <div className="info-section">
+                        <div className="info-section-title">Carrier Tracking</div>
+                        {vessel.blNumber && (
+                            <div className="info-row">
+                                <span className="info-label">B/L Number</span>
+                                <span className="info-value mono">{vessel.blNumber}</span>
+                            </div>
+                        )}
+                        {vessel.containerNumber && (
+                            <div className="info-row">
+                                <span className="info-label">Container</span>
+                                <span className="info-value mono">{vessel.containerNumber}</span>
+                            </div>
+                        )}
+                        <a
+                            href={vessel.carrierTrackingUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="carrier-tracking-link"
+                            style={vessel.carrierColor ? { backgroundColor: vessel.carrierColor } : {}}
+                        >
+                            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                                <path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/>
+                            </svg>
+                            Track on {vessel.carrier}
+                        </a>
+                    </div>
+                )}
 
                 {/* Current Position */}
                 <div className="info-section">
@@ -284,6 +323,17 @@ function VesselInfo({ vessel, onClose }) {
                             <span className="info-value">{Math.round(vessel.distanceRemainingNm)} nm</span>
                         </div>
                     )}
+                    {vessel.hoursRemaining && (
+                        <div className="info-row">
+                            <span className="info-label">Travel Time</span>
+                            <span className="info-value">
+                                {vessel.hoursRemaining >= 24
+                                    ? `${Math.floor(vessel.hoursRemaining / 24)}d ${vessel.hoursRemaining % 24}h`
+                                    : `${vessel.hoursRemaining}h`
+                                }
+                            </span>
+                        </div>
+                    )}
                     {vessel.nextWaypoint && (
                         <div className="info-row">
                             <span className="info-label">Next Waypoint</span>
@@ -291,6 +341,40 @@ function VesselInfo({ vessel, onClose }) {
                         </div>
                     )}
                 </div>
+
+                {/* ETA Breakdown - Bottleneck Delays */}
+                {vessel.bottlenecksPassed && vessel.bottlenecksPassed.length > 0 && (
+                    <div className="info-section">
+                        <div className="info-section-title">Route Delays</div>
+                        <div className="delay-breakdown">
+                            {vessel.bottlenecksPassed.map((zone, idx) => (
+                                <div key={zone.zoneId || idx} className="info-row delay-item">
+                                    <span className="info-label">
+                                        <span className={`severity-dot ${zone.severity}`}></span>
+                                        {zone.zone}
+                                    </span>
+                                    <span className="info-value delay-value">
+                                        +{zone.delay >= 60
+                                            ? `${Math.floor(zone.delay / 60)}h ${zone.delay % 60}m`
+                                            : `${zone.delay}m`
+                                        }
+                                    </span>
+                                </div>
+                            ))}
+                            {vessel.bottleneckDelayMinutes > 0 && (
+                                <div className="info-row total-delay">
+                                    <span className="info-label">Total Delay</span>
+                                    <span className="info-value delay-value">
+                                        +{vessel.bottleneckDelayMinutes >= 60
+                                            ? `${Math.floor(vessel.bottleneckDelayMinutes / 60)}h ${vessel.bottleneckDelayMinutes % 60}m`
+                                            : `${vessel.bottleneckDelayMinutes}m`
+                                        }
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
 
                 {/* Conditions */}
                 {vessel.weather && (
